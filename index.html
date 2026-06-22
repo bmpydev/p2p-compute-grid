@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Global Compute Grid</title>
+    <style>
+        body { background: #0f0f0f; color: #eee; font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+        .hero { text-align: center; margin-bottom: 40px; }
+        .hero h1 { font-size: 3em; margin: 0; background: linear-gradient(45deg, #4CAF50, #2196F3); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+
+        .grid-stats { display: flex; gap: 30px; margin-bottom: 50px; }
+        .stat-box { background: #1a1a1a; padding: 30px; border-radius: 15px; border: 1px solid #333; text-align: center; min-width: 150px; transition: transform 0.3s; }
+        .stat-box:hover { transform: translateY(-10px); border-color: #4CAF50; }
+        .stat-box label { display: block; color: #888; text-transform: uppercase; font-size: 0.8em; letter-spacing: 1px; }
+        .stat-box .number { font-size: 2.5em; font-weight: bold; margin-top: 10px; color: #fff; }
+
+        .cta-buttons { display: flex; gap: 20px; }
+        .btn { padding: 15px 30px; border-radius: 8px; text-decoration: none; font-weight: bold; font-size: 1.1em; transition: 0.3s; }
+        .btn-worker { background: #4CAF50; color: white; }
+        .btn-requester { border: 2px solid #2196F3; color: #2196F3; }
+        .btn:hover { opacity: 0.8; transform: scale(1.05); }
+
+        #map-preview { margin-top: 30px; color: #444; font-size: 0.9em; }
+    </style>
+</head>
+<body>
+    <div class="hero">
+        <h1>P2P Render Farm</h1>
+        <p>Distribute your computing workload across a global network of browsers.</p>
+    </div>
+
+    <div class="grid-stats">
+        <div class="stat-box">
+            <label>Active Nodes</label>
+            <div id="nodes" class="number">0</div>
+        </div>
+        <div class="stat-box">
+            <label>Cluster Power</label>
+            <div id="power" class="number">0</div>
+        </div>
+        <div class="stat-box">
+            <label>Jobs Completed</label>
+            <div id="jobs" class="number">0</div>
+        </div>
+    </div>
+
+    <div class="cta-buttons">
+        <a href="/worker" class="btn btn-worker">Donate Power</a>
+        <a href="/requester" class="btn btn-requester">Start Project</a>
+    </div>
+
+    <div id="map-preview">Active Regions: <span id="regions">-</span></div>
+
+    <script>
+        const ws = new WebSocket("ws://" + window.location.host + "/ws/stats");
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            document.getElementById("nodes").innerText = data.nodes;
+            document.getElementById("power").innerText = data.power.toLocaleString();
+            document.getElementById("jobs").innerText = data.jobs.toLocaleString();
+
+            // Regionen (Flaggen) anzeigen
+            const regions = data.countries.map(code => {
+                if (code === "LOC") return "🏠";
+                return code.toUpperCase().replace(/./g, char => String.fromCodePoint(char.charCodeAt(0) + 127397));
+            });
+            document.getElementById("regions").innerText = [...new Set(regions)].join(" ") || "Keine";
+        };
+    </script>
+</body>
+</html>

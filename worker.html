@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>P2P Compute Node</title>
+    <style>
+        body { background: #222; color: #eee; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; padding-top: 50px; }
+        .node-box { background: #333; padding: 25px; border-radius: 12px; border: 1px solid #444; width: 400px; box-shadow: 0 8px 25px rgba(0,0,0,0.5); }
+        h2 { margin-top: 0; color: #4CAF50; font-size: 1.4em; }
+        .stat-row { display: flex; justify-content: space-between; margin-bottom: 10px; font-size: 0.9em; }
+        #p2pStatus { font-weight: bold; }
+        .slider-container { margin-top: 20px; padding-top: 20px; border-top: 1px solid #444; }
+        input[type=range] { width: 100%; cursor: pointer; }
+        #perfInfo { color: #888; font-size: 0.8em; margin-bottom: 15px; }
+    </style>
+</head>
+<body>
+
+    <div class="node-box">
+        <h2 id="nodeTitle">Initializing WASM...</h2>
+
+        <div id="perfInfo">Determining Hardware Profile...</div>
+
+        <div class="stat-row">
+            <span>State:</span>
+            <span id="p2pStatus" style="color: #FF9800;">Waiting for Connection...</span>
+        </div>
+        <div class="stat-row">
+            <span>CPU Cores:</span>
+            <span id="cpuCores">?</span>
+        </div>
+        <div class="stat-row">
+            <span>Performance Score:</span>
+            <span id="perfScore">? Pts.</span>
+        </div>
+
+        <div class="slider-container">
+            <label>Active Compute Threads: <b id="threadVal">1</b></label>
+            <input type="range" id="threadSlider" min="1" max="1" value="1">
+            <p style="font-size: 0.7em; color: #777; margin-top: 10px;">
+                Increase threads to contribute more CPU cores to the cluster.
+            </p>
+        </div>
+    </div>
+
+    <script type="module">
+        import init, { run_benchmark } from '/pkg/rust_worker.js';
+
+        let subWorkers = [];
+        let dataChannel = null;
+        let headerQueue = [];
+        let globalWS = null;
+
+        async function run() {
+            // WASM & Benchmark
+            await init();
+            const cores = navigator.hardwareConcurrency || 4;
+            const t0 = performance.now();
+            run_benchmark();
+            const score = Math.round(1000 / (performance.now() - t0));
+
+            // UI Update
+            document.getElementById("nodeTitle").innerText = "Compute Node UP";
+            document.getElementById("perfInfo").innerText = "Hardware profile established.";
+            document.getElementById("cpuCores").innerText = cores;
+            document.getElementById("perfScore").innerText = score + " Pts.";
+
+            // Thread Slider Setup
+            const slider = document.getElementById("threadSlider");
+            slider.max = cores;
+            slider.oninput = () => {
+                document.getElementById("threadVal").innerText = slider.value;
+                setupThreads(parseInt(slider.value));
+            };
+            setupThreads(1);
+
+            // Signaling Connection (WebSocket) - only once
+            globalWS = new WebSocket("ws://" + window.location.host + "/ws/worker");
+            let pc;
+
+            globalWS.onopen = () => {
+                console.log("Signaling online. Syncing performance metrics...");
+                // Score to index.html
+                globalWS.send(JSON.stringify({type: "report_score", score: score}));
+            };
+
+            globalWS.onmessage = async (event) => {
+                const msg = JSON.parse(event.data);
+
+                if (msg.type === "offer") {
+                    document.getElementById("p2pStatus").innerText = "Connect P2P...";
+                    pc = new RTCPeerConnection({
+                        iceServers: [
+                            { urls: "stun:stun.l.google.com:19302" },
+                            { urls: "stun:stun1.l.google.com:19302" }
+                        ]
+                    });
+
+                    pc.onicecandidate = (e) => {
+                        if (e.candidate) globalWS.send(JSON.stringify({type: "ice", candidate: e.candidate}));
+                    };
+
+                    pc.ondatachannel = (event) => {
+                        dataChannel = event.channel;
+                        dataChannel.binaryType = "arraybuffer";
+
+                        dataChannel.onopen = () => {
+                            document.getElementById("p2pStatus").innerText = "READY";
+                            document.getElementById("p2pStatus").style.color = "#4CAF50";
+                            // Info to Requester (for List)
+                            dataChannel.send(JSON.stringify({
+                                type: "WORKER_INFO",
+                                score: score,
+                                cores: parseInt(slider.value)
+                            }));
+                        };
+
+                        dataChannel.onmessage = (e) => {
+                            if (typeof e.data === "string") {
+                                const msg = JSON.parse(e.data);
+
+                                if (msg.type === "PING") {
+                                    dataChannel.send(JSON.stringify({ type: "PONG", time: msg.time }));
+                                    return;
+                                }
+
+                                if (msg.type === "MANDELBROT") {
+                                    dispatch(msg, null);
+                                } else {
+                                    headerQueue.push(msg);
+                                }
+                            } else {
+                                const header = headerQueue.shift();
+                                if (header) {
+                                    dispatch(header, e.data);
+                                }
+                            }
+                        };
+                    };
+
+                    await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+                    const answer = await pc.createAnswer();
+                    await pc.setLocalDescription(answer);
+                    globalWS.send(JSON.stringify({type: "answer", sdp: answer}));
+                }
+                else if (msg.type === "ice" && pc) {
+                    await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+                }
+            };
+        }
+
+        function setupThreads(count) {
+            // Stop old Sub-Worker
+            subWorkers.forEach(w => w.terminate());
+            subWorkers = [];
+
+            for(let i = 0; i < count; i++) {
+                const w = new Worker('/compute_node.js', { type: 'module' });
+                w.onmessage = (e) => {
+                    // Result from Sub-Worker -> back to P2P
+                    if (dataChannel && dataChannel.readyState === "open") {
+                        dataChannel.send(JSON.stringify(e.data.metadata));
+                        dataChannel.send(e.data.pixels);
+                    }
+                };
+                subWorkers.push(w);
+            }
+
+            // Scaling capacity
+            if (dataChannel && dataChannel.readyState === "open") {
+                dataChannel.send(JSON.stringify({type: "WORKER_INFO", cores: count}));
+            }
+        }
+
+        function dispatch(header, pixels) {
+            // Dispatch task to a random available sub-worker
+            const worker = subWorkers[Math.floor(Math.random() * subWorkers.length)];
+            worker.postMessage({ header, pixels }, [pixels]);
+        }
+
+        run().catch(err => console.error("Worker Boot Error:", err));
+    </script>
+</body>
+</html>

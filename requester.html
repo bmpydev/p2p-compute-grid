@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>P2P Global Compute Grid</title>
+    <style>
+        :root {
+            --bg-dark: #1a1a1a;
+            --panel-bg: #2a2a2a;
+            --accent-green: #4CAF50;
+            --accent-blue: #2196F3;
+            --accent-orange: #FF9800;
+            --accent-pink: #E91E63;
+            --accent-purple: #9C27B0;
+            --border-color: #444;
+            --text-main: #eee;
+        }
+
+        body {
+            background: var(--bg-dark); color: var(--text-main);
+            font-family: 'Segoe UI', sans-serif; display: flex;
+            flex-direction: column; align-items: center; margin: 0; padding: 20px;
+        }
+
+        /* Stats Bar */
+        .global-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; width: 1000px; margin-bottom: 20px; }
+        .stat-card { background: #222; padding: 15px; border-radius: 10px; border: 1px solid var(--border-color); text-align: center; }
+        .stat-card .value { font-size: 1.5em; font-weight: bold; color: var(--accent-green); }
+
+        /* Tabs System */
+        .tab-container { width: 960px; background: var(--panel-bg); border-radius: 12px; border: 1px solid var(--border-color); overflow: hidden; margin-bottom: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        .tab-buttons { display: flex; background: #111; border-bottom: 1px solid var(--border-color); }
+        .tab-btn {
+            flex: 1; padding: 15px; border: none; background: none; color: #888;
+            cursor: pointer; font-weight: bold; transition: 0.3s; font-size: 0.85em; letter-spacing: 1px;
+        }
+        .tab-btn.active { color: white; background: var(--panel-bg); border-bottom: 3px solid var(--accent-blue); }
+
+        .tab-content { padding: 20px; display: none; }
+        .tab-content.active { display: block; }
+
+        /* Form Elements */
+        .input-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 15px; }
+        .control-group { display: flex; flex-direction: column; gap: 8px; }
+        label { font-size: 0.7em; color: #aaa; text-transform: uppercase; font-weight: bold; }
+
+        input, select, textarea {
+            background: #111; border: 1px solid #555; color: white;
+            padding: 10px; border-radius: 6px; font-family: inherit;
+        }
+
+        /* Shared Components */
+        #shared-logic-area { margin-top: 15px; padding-top: 15px; border-top: 1px solid #444; }
+        #customCode { width: 100%; height: 100px; font-family: 'Courier New', monospace; box-sizing: border-box; font-size: 0.9em; border-color: var(--accent-purple); }
+
+        .formula-controls { display: flex; gap: 10px; margin-top: 5px; align-items: center; }
+        .formula-controls select { flex: 1; font-size: 0.8em; padding: 5px; }
+
+        /* Main Layout Grid */
+        .main-grid { display: grid; grid-template-columns: 320px 1fr; gap: 20px; width: 1000px; }
+
+        /* Compute Cluster Sidebar */
+        #workerList {
+            background: #1e1e1e;
+            border: 2px solid #333;
+            border-radius: 10px;
+            height: 660px;
+            overflow-y: auto;
+            padding: 15px;
+            box-shadow: inset 0 0 10px rgba(0,0,0,0.5);
+        }
+        .worker-header { border-bottom: 2px solid var(--accent-blue); padding-bottom: 10px; margin-bottom: 15px; font-size: 0.9em; text-transform: uppercase; color: var(--accent-blue); letter-spacing: 1px; }
+
+        #canvasContainer {
+            background: #000; border: 2px solid var(--border-color); border-radius: 8px;
+            aspect-ratio: 1; display: flex; justify-content: center; align-items: center;
+        }
+        #dataConsole {
+            background: #000; color: #00ff00; font-family: monospace;
+            padding: 15px; border-radius: 8px; height: 160px; overflow-y: auto;
+            margin-top: 15px; font-size: 0.85em; border: 1px solid #333;
+        }
+
+        button {
+            background: var(--accent-green); color: white; border: none;
+            padding: 10px 15px; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 0.85em;
+        }
+        button:hover { filter: brightness(1.1); }
+        button:disabled { background: #555; opacity: 0.5; cursor: not-allowed; }
+
+        #globalStatus { width: 1000px; text-align: center; margin-bottom: 10px; font-weight: bold; color: var(--accent-green); font-family: monospace; }
+    </style>
+</head>
+<body>
+
+    <h1>P2P Global Compute Grid</h1>
+
+    <div id="globalStatus">INITIALIZING CLUSTER CONNECTION...</div>
+
+    <section class="global-stats">
+        <div class="stat-card"><h4>Nodes Online</h4><div id="totalNodes" class="value">0</div></div>
+        <div class="stat-card"><h4>Cluster Power</h4><div id="totalPower" class="value">0</div></div>
+        <div class="stat-card"><h4>Jobs Completed</h4><div id="totalJobsGlobal" class="value">0</div></div>
+        <div class="stat-card"><h4>Network</h4><div id="netStatus" class="value">Stable</div></div>
+    </section>
+
+    <div class="tab-container">
+        <div class="tab-buttons">
+            <button class="tab-btn active" onclick="openTab(event, 'tab-image')">IMAGE PROCESSING</button>
+            <button class="tab-btn" onclick="openTab(event, 'tab-video')">VIDEO RENDERING</button>
+            <button class="tab-btn" onclick="openTab(event, 'tab-data')">RESEARCH & BIG DATA</button>
+        </div>
+
+        <!-- TAB: IMAGE -->
+        <div id="tab-image" class="tab-content active">
+            <div class="input-row">
+                <div class="control-group">
+                    <label>Select Image</label>
+                    <input type="file" id="imageInput" accept="image/*">
+                </div>
+                <div class="control-group">
+                    <label>Grid Action</label>
+                    <button onclick="uploadAndProcess()">LOAD IMAGE INTO CLUSTER</button>
+                </div>
+            </div>
+            <div class="logic-placeholder"></div>
+        </div>
+
+        <!-- TAB: VIDEO -->
+        <div id="tab-video" class="tab-content">
+            <div class="input-row">
+                <div class="control-group">
+                    <label>Select Video</label>
+                    <input type="file" id="videoInput" accept="video/*">
+                </div>
+                <div class="control-group">
+                    <label>Max Frames</label>
+                    <input type="number" id="maxFramesInput" value="30">
+                </div>
+                <div class="control-group">
+                    <label>Cluster Control</label>
+                    <div style="display:flex; gap:5px;">
+                        <button onclick="processVideo()" style="background:var(--accent-orange); flex:1;">START RENDER</button>
+                        <button id="playBtn" onclick="startPlayback()" disabled>PLAY</button>
+                        <button id="downloadBtn" onclick="exportVideo()" disabled style="background:var(--accent-blue)">SAVE</button>
+                    </div>
+                </div>
+            </div>
+            <div class="logic-placeholder"></div>
+        </div>
+
+        <!-- TAB: BIG DATA -->
+        <div id="tab-data" class="tab-content">
+            <div class="input-row">
+                <div class="control-group">
+                    <label>Raw Data Set (JSON/CSV)</label>
+                    <input type="file" id="rawFileInput">
+                </div>
+                <div class="control-group">
+                    <label>Analysis Level</label>
+                    <button onclick="processRawData()" style="background:var(--accent-pink)">BIG DATA ANALYSIS</button>
+                </div>
+            </div>
+            <div class="logic-placeholder"></div>
+        </div>
+    </div>
+
+    <!-- SHARED LOGIC AREA -->
+    <div id="shared-logic-container" style="display: none;">
+        <div id="shared-logic-area">
+            <div class="input-row">
+                <div class="control-group">
+                    <label>Algorithm Profile</label>
+                    <select id="effectType"></select>
+                </div>
+                <div class="control-group">
+                    <label>Cluster Redundancy</label>
+                    <select id="redundancyLevel" onchange="if(window.scheduler) scheduler.requiredRedundancy = parseInt(this.value)">
+                        <option value="1">1 (Performance)</option>
+                        <option value="2" selected>2 (Verified)</option>
+                        <option value="3">3 (Critical)</option>
+                    </select>
+                </div>
+            </div>
+            <div class="control-group">
+                <label style="color: var(--accent-purple);">Custom Logic Injection (JavaScript)</label>
+                <textarea id="customCode" spellcheck="false">return [255 - r, 255 - g, 255 - b, a];</textarea>
+
+                <div class="formula-controls">
+                    <label style="text-transform: none; color:#888;">Presets:</label>
+                    <select id="formulaSelect" onchange="loadFormula()">
+                        <option value="">-- Saved Formulas --</option>
+                    </select>
+                    <button onclick="saveFormula()" style="background:#444; padding: 5px 10px; font-size: 0.7em;">SAVE FORMULA</button>
+                    <button onclick="deleteFormula()" style="background:#622; padding: 5px 10px; font-size: 0.7em;">DELETE</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="main-grid">
+        <aside id="workerList">
+            <div class="worker-header">Active Compute Nodes</div>
+        </aside>
+
+        <main>
+            <div id="canvasContainer"></div>
+            <div id="frameInfo" style="margin-top:10px; font-family: monospace; color: #888;">Progress: 0 / 0</div>
+            <div id="dataConsole">> System ready for input...</div>
+        </main>
+    </div>
+
+    <script>
+// 1. Defined Presets
+const PRESETS = {
+    "Standard: Invert": "return [255 - r, 255 - g, 255 - b, a];",
+    "Heatmap: Thermal Analysis": `const brightness = (r + g + b) / 3;
+if (brightness < 100) return [0, 0, 20, 255]; // Background noise
+
+// Mapping brightness to heat colors
+const red = brightness > 128 ? 255 : brightness * 2;
+const green = brightness > 128 ? (brightness - 128) * 2 : 0;
+return [red, green, 0, a];`,
+    "Greyscale": "const v = (r + g + b) / 3; return [v, v, v, a];",
+    "Red-Only Filter": "return [r, 0, 0, a];",
+    "Green-Only Filter": "return [0, g, 0, a];",
+    "Blue-Only Filter": "return [0, 0, b, a];",
+    "Gameboy Look": `const gray = (r + g + b) / 3;
+if (gray < 64) return [15, 56, 15, a];      // Dark Green
+if (gray < 128) return [48, 98, 48, a];     // Mid Green
+if (gray < 192) return [139, 172, 15, a];   // Light Green
+return [155, 188, 15, a];                   // Yellow Green`,
+"Heatmap 2": `const v = (r + g + b) / 3;
+const red = v < 128 ? 0 : (v - 128) * 2;
+const green = v < 128 ? v * 2 : 255 - (v - 128) * 2;
+const blue = v < 128 ? 255 - v * 2 : 0;
+return [red, green, blue, a];`,
+"Psychodelic": `const nr = Math.sin(r * 0.05) * 127 + 128;
+const ng = Math.cos(g * 0.05) * 127 + 128;
+const nb = Math.tan(b * 0.01) * 127 + 128;
+return [nr, ng, nb, a];`,
+"Solarize": `const sr = r < 128 ? 255 - r : r;
+const sg = g < 128 ? 255 - g : g;
+const sb = b < 128 ? 255 - b : b;
+return [sr, sg, sb, a];`,
+"High-Contrast Black White": `const threshold = 200;
+const val = (r + g + b) / 3 > threshold ? 255 : 0;
+return [val, val, val, a];`,
+"Tint-Filter (Sepia-Style)": `const gray = (r + g + b) / 3;
+return [gray + 40, gray + 20, gray, a];`,
+"Chroma Key (Greenscreen)": `// If pixel is "greenish", set alpha to 0
+if (g > 100 && r < 100 && b < 100) return [0, 0, 0, 0];
+return [r, g, b, a];`,
+"Green Black (Matrix Look)": `const gray = (r + g + b) / 3;
+const level = Math.floor(gray / 32) * 32;
+return [0, level, 0, a]; // Retro Green Monitor Look`,
+"Glitch Art (Bitwise Glitch)": `// XOR operation on channels
+const nr = r ^ (g >> 2);
+const ng = g ^ (b << 1);
+const nb = b ^ 127;
+return [nr, ng, nb, a];`,
+"Julia Sets": `let x = (r / 255) * 2 - 1;
+let y = (g / 255) * 2 - 1;
+let count = 0;
+
+for(let i = 0; i < 10; i++) {
+    let nextX = x*x - y*y + 0.3;
+    let nextY = 2*x*y + 0.5;
+    x = nextX;
+    y = nextY;
+    if(x*x + y*y > 4) { count = i; break; }
+}
+
+const val = count * 25;
+return [val, val * 0.5, 255 - val, 255];`,
+"Bit-Plane Slicing": `// Keep only two most significant bits
+const nr = r & 0b11000000;
+const ng = g & 0b11000000;
+const nb = b & 0b11000000;
+return [nr, ng, nb, a];`
+};
+
+const PRESETS2 = {
+"Statistical Average (Data Density)": `// Calculates the mean value of the chunk
+let sum = 0;
+for(let i = 0; i < data.length; i++) {
+    sum += data[i];
+}
+const average = Math.floor(sum / data.length);
+return new Uint8Array([average]);`,
+"Pattern Hunting (Sequence Search)": `// Search for pattern [101, 32] -> "e "
+let count = 0;
+for(let i = 0; i < data.length - 1; i++) {
+    if(data[i] === 101 && data[i+1] === 32) {
+        count++;
+    }
+}
+return new Uint8Array([Math.min(count, 255)]);`
+};
+
+const formulaSelect = document.getElementById('formulaSelect');
+const customCode = document.getElementById('customCode');
+
+function loadFormula() {
+    const selected = formulaSelect.value;
+    if (!selected) return;
+
+    if (PRESETS[selected]) {
+        customCode.value = PRESETS[selected];
+    }
+    else if (PRESETS2[selected]) {
+        customCode.value = PRESETS2[selected];
+    }
+    else {
+        const userFormulas = JSON.parse(localStorage.getItem('grid_formulas') || '{}');
+        if (userFormulas[selected]) {
+            customCode.value = userFormulas[selected];
+        }
+    }
+}
+
+function saveFormula() {
+    const name = prompt("Name for your custom formula:");
+    if (!name) return;
+
+    if (PRESETS[name]) {
+        alert("This name is a system preset and cannot be overwritten.");
+        return;
+    }
+
+    const userFormulas = JSON.parse(localStorage.getItem('grid_formulas') || '{}');
+    userFormulas[name] = customCode.value;
+    localStorage.setItem('grid_formulas', JSON.stringify(userFormulas));
+    updateFormulaDropdown();
+    formulaSelect.value = name;
+}
+
+function updateFormulaDropdown() {
+    formulaSelect.innerHTML = '<option value="">-- Select Formula --</option>';
+
+    const optGroupPresets = document.createElement('optgroup');
+    optGroupPresets.label = "Image & Video Presets";
+    for (let name in PRESETS) {
+        const opt = document.createElement('option');
+        opt.value = name;
+        opt.textContent = name;
+        optGroupPresets.appendChild(opt);
+    }
+    formulaSelect.appendChild(optGroupPresets);
+
+    const optGroupPresets2 = document.createElement('optgroup');
+    optGroupPresets2.label = "Big Data Presets";
+    for (let name2 in PRESETS2) {
+        const opt2 = document.createElement('option');
+        opt2.value = name2;
+        opt2.textContent = name2;
+        optGroupPresets2.appendChild(opt2);
+    }
+    formulaSelect.appendChild(optGroupPresets2);
+
+    const userFormulas = JSON.parse(localStorage.getItem('grid_formulas') || '{}');
+    if (Object.keys(userFormulas).length > 0) {
+        const optGroupUser = document.createElement('optgroup');
+        optGroupUser.label = "Your Formulas";
+        for (let name in userFormulas) {
+            const opt = document.createElement('option');
+            opt.value = name;
+            opt.textContent = name;
+            optGroupUser.appendChild(opt);
+        }
+        formulaSelect.appendChild(optGroupUser);
+    }
+}
+
+function deleteFormula() {
+    const name = formulaSelect.value;
+    if (PRESETS[name]) {
+        alert("System presets cannot be deleted.");
+        return;
+    }
+    const userFormulas = JSON.parse(localStorage.getItem('grid_formulas') || '{}');
+    delete userFormulas[name];
+    localStorage.setItem('grid_formulas', JSON.stringify(userFormulas));
+    updateFormulaDropdown();
+}
+
+function openTab(evt, tabName) {
+    const contents = document.getElementsByClassName("tab-content");
+    for (let i = 0; i < contents.length; i++) contents[i].classList.remove("active");
+
+    const buttons = document.getElementsByClassName("tab-btn");
+    for (let i = 0; i < buttons.length; i++) buttons[i].classList.remove("active");
+
+    document.getElementById(tabName).classList.add("active");
+    evt.currentTarget.classList.add("active");
+
+    const logicArea = document.getElementById('shared-logic-area');
+    const effectSelect = document.getElementById('effectType');
+
+    document.querySelector(`#${tabName} .logic-placeholder`).appendChild(logicArea);
+
+    if (tabName === 'tab-data') {
+        effectSelect.innerHTML = `<option value="BIG_DATA">Big Data Mode</option><option value="CUSTOM_LOGIC">Custom Logic Mode</option>`;
+    } else {
+        effectSelect.innerHTML = `
+            <option value="IMAGE_PROC">Invert Colors</option>
+            <option value="IMAGE_SOBEL">Sobel (Edge Detection)</option>
+            <option value="CUSTOM_LOGIC" selected>Custom Logic Mode</option>
+        `;
+    }
+}
+
+window.onload = () => {
+    updateFormulaDropdown();
+    document.querySelector('.tab-btn').click();
+};
+
+        const ws = new WebSocket("ws://" + window.location.host + "/ws/requester");
+        const container = document.getElementById("canvasContainer");
+        const peers = {};
+        let mainCanvas = null, totalTiles = 0, finishedTiles = 0, lastTime = 0, animationId = null;
+        let mediaRecorder = null, recordedChunks = [];
+
+        const scheduler = {
+            tasks: [],
+            finalImages: new Set(),
+            framesData: {},
+            totalFrames: 0,
+            currentFrame: 0,
+            currentCustomCode: "",
+            requiredRedundancy: 2,
+            pendingResults: {}
+        };
+
+        ws.onmessage = async (event) => {
+            const msg = JSON.parse(event.data);
+            if (msg.type === "new_worker") setupP2P(msg.worker_id, msg.geo);
+            else if (msg.type === "init_workers") msg.workers.forEach(w => setupP2P(w.id || w, w.geo));
+            else if (msg.type === "answer" && peers[msg.worker_id]) peers[msg.worker_id].pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+            else if (msg.type === "ice" && peers[msg.worker_id]) peers[msg.worker_id].pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+        };
+
+        async function setupP2P(workerId, geo) {
+            if (peers[workerId]) return;
+            const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+            const dc = pc.createDataChannel("renderChannel");
+            dc.binaryType = "arraybuffer";
+
+            peers[workerId] = {
+                pc, dc,
+                geo: geo || {country:"Unknown", countryCode:"LOCAL"},
+                status: 'connecting', tilesDone: 0, capacity: 1, activeTasks: 0, score: 0, ping: 0
+            };
+
+            const card = document.createElement("div");
+            card.id = `card-${workerId}`; card.className = "worker-card";
+            document.getElementById("workerList").appendChild(card);
+
+            dc.onopen = () => {
+                console.log("Channel Open:", workerId);
+                peers[workerId].status = 'idle';
+                updateUI(workerId);
+                assignTasks();
+            };
+            dc.onclose = () => { peers[workerId].status = 'offline'; updateUI(workerId); };
+
+            let lastMeta = null;
+            dc.onmessage = (e) => {
+                if (typeof e.data === "string") {
+                    const msg = JSON.parse(e.data);
+                    if (msg.type === "PONG") { peers[workerId].ping = Date.now() - msg.time; updateUI(workerId); return; }
+                    if (msg.type === "WORKER_INFO") {
+                        peers[workerId].capacity = msg.cores || 1;
+                        peers[workerId].score = msg.score || 0;
+                        updateUI(workerId); return;
+                    }
+                    lastMeta = msg;
+                } else {
+                    handleResult(workerId, lastMeta, new Uint8Array(e.data));
+                }
+            };
+
+            pc.onicecandidate = (e) => e.candidate && ws.send(JSON.stringify({type:"ice", target_id:workerId, candidate:e.candidate}));
+            const offer = await pc.createOffer(); await pc.setLocalDescription(offer);
+            ws.send(JSON.stringify({type:"offer", target_id:workerId, sdp:offer}));
+        }
+
+        function handleResult(workerId, meta, pixels) {
+            if (!peers[workerId] || !meta) return;
+            const p = peers[workerId];
+            p.activeTasks = Math.max(0, p.activeTasks - 1);
+            p.tilesDone++;
+
+            if (!scheduler.pendingResults[meta.tileId]) scheduler.pendingResults[meta.tileId] = [];
+            if (!scheduler.pendingResults[meta.tileId].some(r => r.workerId === workerId)) {
+                scheduler.pendingResults[meta.tileId].push({ workerId, pixels });
+            }
+
+            const results = scheduler.pendingResults[meta.tileId];
+            const threshold = Math.min(scheduler.requiredRedundancy, Object.keys(peers).length);
+
+            if (results.length >= threshold) {
+                const res1 = results[0].pixels;
+                if (!scheduler.finalImages.has(meta.tileId)) {
+                    scheduler.finalImages.add(meta.tileId);
+
+                    if (meta.type === "DATA_RESULT") {
+                        logToConsole(`> Chunk ${meta.tileId} verified. Result Byte: ${res1[0]}`);
+                    } else {
+                        if (meta.frameId !== undefined) {
+                            if (!scheduler.framesData[meta.frameId]) scheduler.framesData[meta.frameId] = [];
+                            scheduler.framesData[meta.frameId].push({ x: meta.x, y: meta.y, w: meta.w, h: meta.h, pixels: res1 });
+                        }
+                        const ctx = mainCanvas.getContext("2d");
+                        ctx.putImageData(new ImageData(new Uint8ClampedArray(res1), meta.w, meta.h), meta.x, meta.y);
+                    }
+
+                    finishedTiles++;
+                    document.getElementById("frameInfo").innerText = `Progress: ${finishedTiles} / ${totalTiles}`;
+                    if (finishedTiles === totalTiles) {
+                        document.getElementById("globalStatus").innerText = "COMPUTATION COMPLETED!";
+                        document.getElementById("playBtn").disabled = false;
+                    }
+                }
+            }
+            updateUI(workerId);
+            assignTasks();
+        }
+
+        function assignTasks() {
+            const availableWorkers = Object.keys(peers).filter(id =>
+                peers[id].status !== 'offline' && peers[id].dc?.readyState === "open"
+            );
+
+            availableWorkers.forEach(workerId => {
+                const p = peers[workerId];
+                while (p.activeTasks < p.capacity) {
+                    const task = scheduler.tasks.find(t => {
+                        const res = scheduler.pendingResults[t.tileId] || [];
+                        const alreadyDoneByMe = res.some(r => r.workerId === workerId);
+                        const threshold = Math.min(scheduler.requiredRedundancy, availableWorkers.length);
+                        return !scheduler.finalImages.has(t.tileId) && res.length < threshold && !alreadyDoneByMe;
+                    });
+
+                    if (!task) break;
+
+                    if (!task.assignedTo) task.assignedTo = new Set();
+                    task.assignedTo.add(workerId);
+                    p.activeTasks++;
+
+                    const header = { ...task };
+                    header.customCode = scheduler.currentCustomCode;
+                    delete header.rawPixels;
+                    delete header.assignedTo;
+
+                    p.dc.send(JSON.stringify(header));
+
+                    if (task.rawPixels) {
+                        p.dc.send(task.rawPixels);
+                    }
+                }
+            });
+        }
+
+        async function processRawData() {
+            const file = document.getElementById("rawFileInput").files[0];
+            if (!file) return;
+            prepareTasks("BIG_DATA");
+            const buffer = await file.arrayBuffer();
+            const CHUNK_SIZE = 64 * 1024;
+
+            for (let i = 0; i < buffer.byteLength; i += CHUNK_SIZE) {
+                const chunkData = new Uint8Array(buffer.slice(i, i + CHUNK_SIZE));
+                scheduler.tasks.push({
+                    type: "BIG_DATA",
+                    tileId: `d-${i}`,
+                    rawPixels: chunkData,
+                    assignedTo: new Set()
+                });
+            }
+            totalTiles = scheduler.tasks.length;
+            logToConsole(`> Analysis started: ${file.name} (${totalTiles} Chunks)`);
+            assignTasks();
+        }
+
+        async function uploadAndProcess() {
+            const file = document.getElementById("imageInput").files[0];
+            if(!file) return;
+            const img = new Image(); img.src = URL.createObjectURL(file);
+            img.onload = () => {
+                initCanvas(img.width, img.height);
+                const tCtx = createTempCtx(img.width, img.height);
+                tCtx.drawImage(img, 0, 0);
+                const type = document.getElementById("effectType").value;
+                prepareTasks(type);
+                for (let y = 0; y < img.height; y+=50) {
+                    for (let x = 0; x < img.width; x+=50) {
+                        const w = Math.min(50, img.width-x), h = Math.min(50, img.height-y);
+                        scheduler.tasks.push({ type, tileId: `i${x}-${y}`, x, y, w, h, rawPixels: tCtx.getImageData(x,y,w,h).data });
+                    }
+                }
+                totalTiles = scheduler.tasks.length; assignTasks();
+            };
+        }
+
+        async function processVideo() {
+            const file = document.getElementById("videoInput").files[0];
+            if(!file) return;
+            const vid = document.createElement("video"); vid.src = URL.createObjectURL(file);
+            await new Promise(r => vid.onloadedmetadata = r); await vid.play();
+            initCanvas(vid.videoWidth, vid.videoHeight);
+            const tCtx = createTempCtx(vid.videoWidth, vid.videoHeight);
+            const type = document.getElementById("effectType").value;
+            prepareTasks(type);
+            const frames = parseInt(document.getElementById("maxFramesInput").value) || 30;
+            scheduler.totalFrames = frames;
+            for (let f = 0; f < frames; f++) {
+                vid.currentTime = f/30; await new Promise(r => vid.onseeked = r);
+                tCtx.drawImage(vid, 0, 0);
+                for (let y = 0; y < vid.videoHeight; y+=100) {
+                    for (let x = 0; x < vid.videoWidth; x+=100) {
+                        const w = Math.min(100, vid.videoWidth-x), h = Math.min(100, vid.videoHeight-y);
+                        scheduler.tasks.push({ type, frameId: f, tileId: `v${f}-${x}-${y}`, x, y, w, h, rawPixels: tCtx.getImageData(x,y,w,h).data });
+                    }
+                }
+            }
+            totalTiles = scheduler.tasks.length; assignTasks();
+        }
+
+        function initCanvas(w, h) {
+            if(!mainCanvas) { container.innerHTML = ""; mainCanvas = document.createElement("canvas"); container.appendChild(mainCanvas); }
+            mainCanvas.width = w; mainCanvas.height = h;
+        }
+        function createTempCtx(w, h) { const c = document.createElement("canvas"); c.width = w; c.height = h; return c.getContext("2d"); }
+        function prepareTasks(type) {
+            scheduler.tasks = []; scheduler.finalImages.clear(); scheduler.framesData = {}; scheduler.pendingResults = {};
+            scheduler.currentCustomCode = document.getElementById("customCode").value;
+            finishedTiles = 0;
+            document.getElementById("globalStatus").innerText = `Cluster processing: ${type}`;
+        }
+        function logToConsole(msg) { const con = document.getElementById("dataConsole"); con.innerHTML = `<div>${msg}</div>` + con.innerHTML; }
+
+        function updateUI(id) {
+            const p = peers[id], card = document.getElementById(`card-${id}`);
+            if(!card) return;
+            const getFlag = (c) => { if(c==="LOCAL") return "🏠"; if(c==="UNKNOWN") return "🌐"; return c.toUpperCase().replace(/./g, char => String.fromCodePoint(char.charCodeAt(0) + 127397)); };
+            card.innerHTML = `<div style="display:flex; justify-content:space-between;"><strong>${getFlag(p.geo.countryCode)} ${p.geo.country}</strong><small>${p.ping}ms</small></div>Threads: ${p.capacity} | Jobs: ${p.tilesDone}`;
+            card.className = `worker-card ${p.activeTasks < p.capacity ? 'active' : 'busy'}`;
+            calculateGlobalStats();
+        }
+
+        function calculateGlobalStats() {
+            const active = Object.values(peers).filter(p => p.status !== 'offline');
+            const power = active.reduce((s, p) => s + (p.score || 0), 0);
+            const jobs = active.reduce((s, p) => s + p.tilesDone, 0);
+            document.getElementById("totalNodes").innerText = active.length;
+            document.getElementById("totalPower").innerText = power;
+            document.getElementById("totalJobsGlobal").innerText = jobs;
+        }
+
+        function startPlayback() {
+            let f = 0;
+            const play = () => {
+                const tiles = scheduler.framesData[f];
+                if (tiles) { const ctx = mainCanvas.getContext("2d"); tiles.forEach(t => ctx.putImageData(new ImageData(new Uint8ClampedArray(t.pixels), t.w, t.h), t.x, t.y)); }
+                f++; if (f < scheduler.totalFrames) animationId = requestAnimationFrame(play);
+                else if (mediaRecorder?.state === "recording") mediaRecorder.stop();
+            };
+            play();
+        }
+
+        function exportVideo() {
+            recordedChunks = [];
+            const stream = mainCanvas.captureStream(30);
+            mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+            mediaRecorder.ondataavailable = (e) => e.data.size > 0 && recordedChunks.push(e.data);
+            mediaRecorder.onstop = () => {
+                const blob = new Blob(recordedChunks, { type: 'video/webm' });
+                const a = document.body.appendChild(document.createElement('a')); a.href = URL.createObjectURL(blob);
+                a.download = `render-${Date.now()}.webm`; a.click();
+            };
+            mediaRecorder.start(); startPlayback();
+        }
+
+        setInterval(() => {
+            Object.keys(peers).forEach(id => {
+                const p = peers[id];
+                if (p.dc?.readyState === "open") p.dc.send(JSON.stringify({ type: "PING", time: Date.now() }));
+            });
+        }, 3000);
+    </script>
+</body>
+</html>

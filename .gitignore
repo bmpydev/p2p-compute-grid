@@ -1,0 +1,30 @@
+# --- RUST ---
+/rust_worker/target/
+/rust_worker/pkg/
+
+# --- PYTHON ---
+# Python Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virt
+.venv/
+venv/
+ENV/
+env/
+
+# --- FRONTEND / WASM ---
+node_modules/
+.wasm
+
+# --- OS-Specific ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- IDE / EDITOR ---
+.vscode/
+.idea/
+*.swp
+*.swo
