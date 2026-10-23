@@ -418,7 +418,7 @@ window.onload = () => {
         // Token aus #token=... (wird nicht an den Server übertragen) oder per Abfrage
         const authToken = new URLSearchParams(location.hash.slice(1)).get("token")
             || prompt("Requester token (shown in the server console):") || "";
-        const ws = new WebSocket("ws://" + window.location.host + "/ws/requester");
+        const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + window.location.host + "/ws/requester");
         ws.onopen = () => ws.send(JSON.stringify({ type: "auth", token: authToken }));
         ws.onclose = (e) => {
             document.getElementById("globalStatus").innerText =

@@ -34,16 +34,32 @@ wasm-pack build --target web
 pip install fastapi uvicorn requests
 ```
 ```bash
-python main.py
-```
-or
-```bash
 python3 main.py
 ```
 
+By default the server only listens on `127.0.0.1:8000`. Configuration via
+environment variables:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `GRID_HOST` / `GRID_PORT` | `127.0.0.1` / `8000` | Bind address. A non-loopback address requires TLS. |
+| `GRID_SSL_CERTFILE` / `GRID_SSL_KEYFILE` | – | Serve HTTPS/WSS directly. |
+| `GRID_ALLOWED_HOSTS` | – | Extra host names/IPs (comma-separated) the grid may be reached under, e.g. `grid.example.com,192.168.1.10`. `localhost`, `127.0.0.1` and `::1` are always allowed. |
+| `GRID_ALLOW_INSECURE` | – | `1` allows a non-loopback bind without TLS (tokens travel in plain text). |
+| `GRID_REQUESTER_TOKEN` / `GRID_WORKER_TOKEN` | random / – | See below. |
+
+Example for a LAN with TLS:
+```bash
+GRID_HOST=0.0.0.0 GRID_ALLOWED_HOSTS=192.168.1.10 \
+GRID_SSL_CERTFILE=cert.pem GRID_SSL_KEYFILE=key.pem python3 main.py
+```
+Behind a TLS reverse proxy, keep `GRID_HOST=127.0.0.1`, add the public host
+name to `GRID_ALLOWED_HOSTS` and forward the original `Host` header.
+
 ### 4. Run the Grid
 
-1.  Open http://localhost:8000 to see the Global Dashboard.
+1.  Open http://localhost:8000 to see the Global Dashboard. WebSocket
+    connections only accept pages from the same origin.
 2.  Open /worker in multiple tabs (or different devices) to provide compute
     power.
 3.  Open /requester to start a rendering or data analysis job. Requesters must

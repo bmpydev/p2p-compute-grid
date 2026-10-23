@@ -2,11 +2,59 @@ import uuid, json, os, requests, asyncio, hmac, secrets, math, time
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import Headers
+from starlette.responses import PlainTextResponse
+from urllib.parse import urlsplit
 
 app = FastAPI()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Falls der Pfad zu rust_worker/pkg anders ist, bitte anpassen:
 app.mount("/pkg", StaticFiles(directory=os.path.join(BASE_DIR, "rust_worker", "pkg")), name="pkg")
+
+# Netzwerk: standardmäßig nur lokal erreichbar; ins Netz nur mit TLS (siehe __main__)
+LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+GRID_HOST = os.environ.get("GRID_HOST", "127.0.0.1")
+GRID_PORT = int(os.environ.get("GRID_PORT", "8000"))
+SSL_CERTFILE = os.environ.get("GRID_SSL_CERTFILE")
+SSL_KEYFILE = os.environ.get("GRID_SSL_KEYFILE")
+# Hostnamen, unter denen der Server aufgerufen werden darf (Schutz vor DNS-Rebinding)
+ALLOWED_HOSTS = LOOPBACK_HOSTS | {
+    h.strip().lower() for h in os.environ.get("GRID_ALLOWED_HOSTS", "").split(",") if h.strip()}
+
+def hostname_of(netloc):
+    # "example.com:8000" / "[::1]:8000" -> "example.com" / "::1"; ungültig -> None
+    try:
+        return urlsplit("//" + netloc).hostname
+    except ValueError:
+        return None
+
+class HostOriginGuard:
+    # Host-Header gegen ALLOWED_HOSTS prüfen (DNS-Rebinding) und bei WebSockets den Origin
+    # gegen den Host (Cross-Site-WebSocket-Hijacking). Starlettes TrustedHostMiddleware
+    # zerlegt IPv6-Hosts falsch, daher eigene Variante.
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket"):
+            headers = Headers(scope=scope)
+            host = headers.get("host", "")
+            ok = hostname_of(host) in ALLOWED_HOSTS
+            if ok and scope["type"] == "websocket":
+                # Browser senden immer Origin; ohne Origin (kein Browser) gibt es kein CSWSH
+                origin = headers.get("origin")
+                if origin is not None:
+                    parts = urlsplit(origin)
+                    ok = parts.scheme in ("http", "https") and parts.netloc.lower() == host.lower()
+            if not ok:
+                if scope["type"] == "websocket":
+                    await send({"type": "websocket.close", "code": 1008})
+                else:
+                    await PlainTextResponse("Invalid host header", status_code=400)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+app.add_middleware(HostOriginGuard)
 
 # Requester dürfen Code an alle Worker verteilen -> immer Token-pflichtig.
 # Ohne GRID_REQUESTER_TOKEN wird bei jedem Start ein zufälliger Token erzeugt.
@@ -280,5 +328,14 @@ async def requester_endpoint(websocket: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
+    tls = bool(SSL_CERTFILE and SSL_KEYFILE)
+    # Ohne TLS gingen Token und Signaling im Klartext durchs Netz -> nur lokal erlauben
+    if GRID_HOST not in LOOPBACK_HOSTS and not tls and os.environ.get("GRID_ALLOW_INSECURE") != "1":
+        raise SystemExit(
+            f"[grid] GRID_HOST={GRID_HOST} ohne TLS verweigert: GRID_SSL_CERTFILE und GRID_SSL_KEYFILE setzen, "
+            "einen TLS-Reverse-Proxy vor 127.0.0.1 nutzen oder (unsicher) GRID_ALLOW_INSECURE=1.")
+    if GRID_HOST not in LOOPBACK_HOSTS and ALLOWED_HOSTS == LOOPBACK_HOSTS:
+        print("[grid] Hinweis: GRID_ALLOWED_HOSTS ist leer, Aufrufe über andere Hostnamen/IPs werden abgelehnt.", flush=True)
     # Frames über dem Limit verwirft uvicorn schon beim Empfang (bei uvicorn-CLI: --ws-max-size 65536)
-    uvicorn.run(app, host="0.0.0.0", port=8000, ws_max_size=MAX_MESSAGE_BYTES)
+    uvicorn.run(app, host=GRID_HOST, port=GRID_PORT, ws_max_size=MAX_MESSAGE_BYTES,
+                ssl_certfile=SSL_CERTFILE if tls else None, ssl_keyfile=SSL_KEYFILE if tls else None)

@@ -51,7 +51,7 @@
     <div id="map-preview">Active Regions: <span id="regions">-</span></div>
 
     <script>
-        const ws = new WebSocket("ws://" + window.location.host + "/ws/stats");
+        const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + window.location.host + "/ws/stats");
         ws.onmessage = (event) => {
             const data = JSON.parse(event.data);
             document.getElementById("nodes").innerText = data.nodes;

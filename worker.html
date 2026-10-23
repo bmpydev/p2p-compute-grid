@@ -73,7 +73,7 @@
             setupThreads(1);
 
             // Signaling Connection (WebSocket) - only once
-            globalWS = new WebSocket("ws://" + window.location.host + "/ws/worker");
+            globalWS = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + window.location.host + "/ws/worker");
 
             globalWS.onopen = () => {
                 console.log("Signaling online. Syncing performance metrics...");
