@@ -415,7 +415,15 @@ window.onload = () => {
     document.querySelector('.tab-btn').click();
 };
 
+        // Token aus #token=... (wird nicht an den Server übertragen) oder per Abfrage
+        const authToken = new URLSearchParams(location.hash.slice(1)).get("token")
+            || prompt("Requester token (shown in the server console):") || "";
         const ws = new WebSocket("ws://" + window.location.host + "/ws/requester");
+        ws.onopen = () => ws.send(JSON.stringify({ type: "auth", token: authToken }));
+        ws.onclose = (e) => {
+            document.getElementById("globalStatus").innerText =
+                e.code === 1008 ? "ACCESS DENIED: INVALID REQUESTER TOKEN" : "CLUSTER CONNECTION LOST";
+        };
         const container = document.getElementById("canvasContainer");
         const peers = {};
         let mainCanvas = null, totalTiles = 0, finishedTiles = 0, lastTime = 0, animationId = null;

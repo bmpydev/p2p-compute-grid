@@ -1,4 +1,4 @@
-import uuid, json, os, requests
+import uuid, json, os, requests, asyncio, hmac, secrets
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -7,6 +7,33 @@ app = FastAPI()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Falls der Pfad zu rust_worker/pkg anders ist, bitte anpassen:
 app.mount("/pkg", StaticFiles(directory=os.path.join(BASE_DIR, "rust_worker", "pkg")), name="pkg")
+
+# Requester dürfen Code an alle Worker verteilen -> immer Token-pflichtig.
+# Ohne GRID_REQUESTER_TOKEN wird bei jedem Start ein zufälliger Token erzeugt.
+REQUESTER_TOKEN = os.environ.get("GRID_REQUESTER_TOKEN") or secrets.token_urlsafe(24)
+# Worker sind optional geschützt (offenes Volunteer-Grid, solange nicht gesetzt).
+WORKER_TOKEN = os.environ.get("GRID_WORKER_TOKEN")
+AUTH_TIMEOUT_S = 5
+print(f"[grid] Requester-Zugang: /requester#token={REQUESTER_TOKEN}", flush=True)
+if WORKER_TOKEN:
+    print("[grid] Worker benötigen Token: /worker#token=<GRID_WORKER_TOKEN>", flush=True)
+
+async def authenticate(websocket: WebSocket, expected_token):
+    # Erste Nachricht muss {"type": "auth", "token": ...} sein, sonst Close 1008
+    await websocket.accept()
+    try:
+        msg = json.loads(await asyncio.wait_for(websocket.receive_text(), AUTH_TIMEOUT_S))
+        token = msg.get("token") if isinstance(msg, dict) and msg.get("type") == "auth" else None
+        ok = isinstance(token, str) and (
+            expected_token is None or hmac.compare_digest(token.encode(), expected_token.encode()))
+    except (asyncio.TimeoutError, WebSocketDisconnect, ValueError):
+        ok = False
+    if not ok:
+        try:
+            await websocket.close(code=1008)
+        except Exception:
+            pass
+    return ok
 
 def get_geo_info(ip):
     if ip == "127.0.0.1" or ip == "localhost":
@@ -46,7 +73,6 @@ class ConnectionManager:
                 self.stats_listeners.remove(listener)
 
     async def connect_worker(self, websocket: WebSocket):
-        await websocket.accept()
         worker_id = str(uuid.uuid4())[:8]
         geo = get_geo_info(websocket.client.host)
         self.active_workers[worker_id] = {"ws": websocket, "geo": geo}
@@ -60,7 +86,6 @@ class ConnectionManager:
         await self.broadcast_stats()
 
     async def connect_requester(self, websocket: WebSocket):
-        await websocket.accept()
         self.requester = websocket
         # WICHTIG: Liste von Objekten senden
         workers_list = [{"id": k, "geo": v["geo"]} for k, v in self.active_workers.items()]
@@ -116,6 +141,8 @@ async def stats_endpoint(websocket: WebSocket):
 
 @app.websocket("/ws/worker")
 async def worker_endpoint(websocket: WebSocket):
+    if not await authenticate(websocket, WORKER_TOKEN):
+        return
     worker_id = await manager.connect_worker(websocket)
     await manager.broadcast_stats()
     try:
@@ -135,6 +162,8 @@ async def worker_endpoint(websocket: WebSocket):
 
 @app.websocket("/ws/requester")
 async def requester_endpoint(websocket: WebSocket):
+    if not await authenticate(websocket, REQUESTER_TOKEN):
+        return
     await manager.connect_requester(websocket)
     try:
         while True:

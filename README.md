@@ -46,7 +46,12 @@ python3 main.py
 1.  Open http://localhost:8000 to see the Global Dashboard.
 2.  Open /worker in multiple tabs (or different devices) to provide compute
     power.
-3.  Open /requester to start a rendering or data analysis job.
+3.  Open /requester to start a rendering or data analysis job. Requesters must
+    authenticate: on startup the server prints the link
+    `/requester#token=...`. Set `GRID_REQUESTER_TOKEN` for a fixed token,
+    otherwise a random one is generated on every start.
+4.  Optional: set `GRID_WORKER_TOKEN` to only allow workers that open
+    `/worker#token=<GRID_WORKER_TOKEN>`. Without it, anyone can join as worker.
 
 ### Security & Design Decisions
 

@@ -79,8 +79,16 @@
 
             globalWS.onopen = () => {
                 console.log("Signaling online. Syncing performance metrics...");
+                // Token nur nötig, wenn der Server GRID_WORKER_TOKEN gesetzt hat
+                const token = new URLSearchParams(location.hash.slice(1)).get("token") || "";
+                globalWS.send(JSON.stringify({type: "auth", token}));
                 // Score to index.html
                 globalWS.send(JSON.stringify({type: "report_score", score: score}));
+            };
+
+            globalWS.onclose = (e) => {
+                document.getElementById("p2pStatus").innerText =
+                    e.code === 1008 ? "ACCESS DENIED (worker token)" : "OFFLINE";
             };
 
             globalWS.onmessage = async (event) => {
