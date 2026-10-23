@@ -67,7 +67,9 @@ name to `GRID_ALLOWED_HOSTS` and forward the original `Host` header.
     `/requester#token=...`. Set `GRID_REQUESTER_TOKEN` for a fixed token,
     otherwise a random one is generated on every start.
 4.  Optional: set `GRID_WORKER_TOKEN` to only allow workers that open
-    `/worker#token=<GRID_WORKER_TOKEN>`. Without it, anyone can join as worker.
+    `/worker#token=<GRID_WORKER_TOKEN>`. Without it, anyone who can reach the
+    server can join as worker – see [Trust model](#trust-model) before exposing
+    the grid beyond your own machines.
 
 ### Tests
 
@@ -96,6 +98,29 @@ with e.g. `npm test -- sobel`.
     browser. If the CSP is not enforced, the sandbox refuses to run custom code.
   - JIT-Optimized Loops: Custom logic is wrapped in a pre-compiled function
     scope to allow the V8 engine to optimize execution paths.
+
+### Trust model
+
+Requesters are authenticated, workers are open by default. A worker is an
+untrusted browser tab, so with an open grid assume that strangers process your
+jobs:
+
+  - **No confidentiality:** workers receive the tiles of your image or data set
+    and the custom JavaScript you deploy. Do not process anything private on a
+    grid with untrusted workers.
+  - **Results can be forged:** verification only accepts a tile when
+    *redundancy* different workers return identical bytes. One person can open
+    several worker tabs, so this protects against single faulty or malicious
+    workers, not against someone controlling enough of the grid. Redundancy 1
+    disables verification entirely.
+  - **IP addresses are visible:** WebRTC connects requester and workers
+    directly, so each side learns the other's IP address. ICE candidates are
+    gathered via Google's public STUN servers.
+  - **Statistics are not trustworthy:** worker count, capacity and benchmark
+    scores are self-reported.
+
+For anything beyond a test setup on your own devices, set `GRID_WORKER_TOKEN`
+and only hand the worker link to machines you trust.
 
 ### License
 MIT
