@@ -1,4 +1,5 @@
-import uuid, json, os, asyncio, hmac, secrets, math, time
+import uuid, json, os, asyncio, hmac, secrets, math, time, hashlib, re, sys
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -83,8 +84,11 @@ class SecurityHeaders:
 app.add_middleware(SecurityHeaders)
 
 # Requester dürfen Code an alle Worker verteilen -> immer Token-pflichtig.
-# Ohne GRID_REQUESTER_TOKEN wird bei jedem Start ein zufälliger Token erzeugt.
+# Ohne Token-Datei gilt ein gemeinsamer Token: GRID_REQUESTER_TOKEN oder bei jedem Start ein zufälliger.
 REQUESTER_TOKEN = os.environ.get("GRID_REQUESTER_TOKEN") or secrets.token_urlsafe(24)
+# Mit Token-Datei ein Token je Person (python3 main.py add-requester NAME)
+REQUESTER_TOKENS_FILE = os.environ.get("GRID_REQUESTER_TOKENS_FILE") or os.path.join(BASE_DIR, "requester_tokens.txt")
+TOKEN_RELOAD_S = 2
 # Worker sind optional geschützt (offenes Volunteer-Grid, solange nicht gesetzt).
 WORKER_TOKEN = os.environ.get("GRID_WORKER_TOKEN")
 AUTH_TIMEOUT_S = 5
@@ -97,26 +101,104 @@ MAX_STATS_LISTENERS = 500
 MSG_RATE = 50       # Nachrichten pro Sekunde je Verbindung ...
 MSG_BURST = 200     # ... mit kurzzeitigem Puffer (ICE-Bursts beim Verbindungsaufbau)
 MAX_SCORE = 1_000_000
-print(f"[grid] Requester-Zugang: /requester#token={REQUESTER_TOKEN}", flush=True)
-if WORKER_TOKEN:
-    print("[grid] Worker benötigen Token: /worker#token=<GRID_WORKER_TOKEN>", flush=True)
+TOKEN_NAME_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+TOKEN_HASH_RE = re.compile(r"[0-9a-f]{64}")
 
-async def authenticate(websocket: WebSocket, expected_token):
-    # Erste Nachricht muss {"type": "auth", "token": ...} sein, sonst Close 1008
+def token_hash(token):
+    return hashlib.sha256(token.encode()).hexdigest()
+
+def read_token_file(path):
+    # Zeilen "name sha256-hash"; Leerzeilen und # ignorieren, ungültige Zeilen melden und überspringen
+    entries = []
+    with open(path, encoding="utf-8") as f:
+        for number, line in enumerate(f, 1):
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) == 2 and TOKEN_NAME_RE.fullmatch(parts[0]) and TOKEN_HASH_RE.fullmatch(parts[1]):
+                entries.append((parts[0], parts[1]))
+            else:
+                print(f"[grid] {path}:{number}: ungültige Zeile übersprungen", flush=True)
+    return entries
+
+def write_token_file(path, entries):
+    # Atomar ersetzen, damit der laufende Server nie eine halb geschriebene Datei liest
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("# name sha256(token) - verwalten mit: python3 main.py add-requester/remove-requester NAME\n")
+        for name, digest in entries:
+            f.write(f"{name} {digest}\n")
+    os.replace(tmp, path)
+
+class RequesterTokens:
+    # Ohne Datei gilt der gemeinsame REQUESTER_TOKEN. Sobald die Datei existiert, gelten nur ihre
+    # Einträge; sie wird bei Änderung neu eingelesen (auch wenn sie später gelöscht wird: dann niemand).
+    def __init__(self, path, shared_token):
+        self.path = path
+        self.shared = {token_hash(shared_token): "requester"}
+        self.file_mode = False
+        self.entries = {} # hash: name
+        self.signature = None
+
+    def refresh(self):
+        try:
+            st = os.stat(self.path)
+            signature = (st.st_mtime_ns, st.st_size, st.st_ino)
+            if signature == self.signature:
+                return
+            entries = read_token_file(self.path)
+        except FileNotFoundError:
+            if self.file_mode and self.signature is not None:
+                print(f"[grid] {self.path} fehlt: keine Requester-Anmeldung möglich", flush=True)
+            self.signature, self.entries = None, {}
+            return
+        except (OSError, UnicodeDecodeError) as e:
+            print(f"[grid] {self.path} nicht lesbar ({e}): keine Requester-Anmeldung möglich", flush=True)
+            self.signature, self.entries, self.file_mode = None, {}, True
+            return
+        self.signature, self.file_mode = signature, True
+        self.entries = {digest: name for name, digest in entries}
+
+    def active(self):
+        return self.entries if self.file_mode else self.shared
+
+    def check(self, token):
+        # Liefert (name, hash) oder None; vergleicht gegen alle Einträge in konstanter Zeit je Eintrag
+        self.refresh()
+        presented, found = token_hash(token), None
+        for digest, name in self.active().items():
+            if hmac.compare_digest(presented, digest):
+                found = (name, digest)
+        return found
+
+    def is_valid(self, digest):
+        return digest in self.active()
+
+requester_tokens = RequesterTokens(REQUESTER_TOKENS_FILE, REQUESTER_TOKEN)
+
+def check_worker_token(token):
+    if WORKER_TOKEN is None or hmac.compare_digest(token.encode(), WORKER_TOKEN.encode()):
+        return True
+    return None
+
+async def authenticate(websocket: WebSocket, check):
+    # Erste Nachricht muss {"type": "auth", "token": ...} sein, sonst Close 1008.
+    # check(token) liefert die Identität oder None.
     await websocket.accept()
     try:
         msg = json.loads(await asyncio.wait_for(websocket.receive_text(), AUTH_TIMEOUT_S))
         token = msg.get("token") if isinstance(msg, dict) and msg.get("type") == "auth" else None
-        ok = isinstance(token, str) and (
-            expected_token is None or hmac.compare_digest(token.encode(), expected_token.encode()))
+        identity = check(token) if isinstance(token, str) else None
     except (asyncio.TimeoutError, WebSocketDisconnect, ValueError, KeyError):
-        ok = False
-    if not ok:
+        identity = None
+    if identity is None:
         try:
             await websocket.close(code=1008)
         except Exception:
             pass
-    return ok
+    return identity
 
 class RateLimiter:
     # Token-Bucket je Verbindung. Bremst statt zu verwerfen, damit kein ICE verloren geht;
@@ -157,6 +239,7 @@ class ConnectionManager:
     def __init__(self):
         self.active_workers = {} # id: {"ws": websocket, "score": score}
         self.requesters = {} # id: websocket
+        self.requester_auth = {} # id: (name, token-hash)
         self.stats_listeners = set() # Neu: Alle Besucher der index.html
         self.total_verified_jobs = 0 # Neu: Globaler Zähler
 
@@ -187,9 +270,10 @@ class ConnectionManager:
         })
         return worker_id
 
-    async def connect_requester(self, websocket: WebSocket):
+    async def connect_requester(self, websocket: WebSocket, auth):
         requester_id = str(uuid.uuid4())[:8]
         self.requesters[requester_id] = websocket
+        self.requester_auth[requester_id] = auth
         # WICHTIG: Liste von Objekten senden
         workers_list = [{"id": k} for k in self.active_workers]
         try:
@@ -199,7 +283,9 @@ class ConnectionManager:
             }))
         except Exception:
             self.requesters.pop(requester_id, None)
+            self.requester_auth.pop(requester_id, None)
             raise
+        print(f"[grid] Requester {auth[0]} verbunden ({requester_id})", flush=True)
         return requester_id
 
     def disconnect_worker(self, worker_id: str):
@@ -208,12 +294,28 @@ class ConnectionManager:
 
     async def disconnect_requester(self, requester_id: str):
         self.requesters.pop(requester_id, None)
+        auth = self.requester_auth.pop(requester_id, None)
+        if auth:
+            print(f"[grid] Requester {auth[0]} getrennt ({requester_id})", flush=True)
         # Worker bauen ihre Peer-Verbindung zu diesem Requester ab
         for worker in list(self.active_workers.values()):
             try:
                 await worker["ws"].send_text(json.dumps({"type": "requester_left", "requester_id": requester_id}))
             except Exception:
                 pass
+
+    async def drop_revoked_requesters(self):
+        # Requester, deren Token aus der Datei entfernt wurde, sofort trennen; Aufräumen macht ihr Handler
+        for requester_id, (name, digest) in list(self.requester_auth.items()):
+            if not requester_tokens.is_valid(digest):
+                print(f"[grid] Token von {name} entzogen, trenne {requester_id}", flush=True)
+                del self.requester_auth[requester_id]
+                ws = self.requesters.pop(requester_id, None)
+                if ws:
+                    try:
+                        await ws.close(code=1008)
+                    except Exception:
+                        pass
 
     async def broadcast_to_requesters(self, message: dict):
         data = json.dumps(message)
@@ -242,6 +344,30 @@ class ConnectionManager:
                 pass # Requester gerade weg; sein Handler räumt auf
 
 manager = ConnectionManager()
+
+async def watch_requester_tokens():
+    while True:
+        await asyncio.sleep(TOKEN_RELOAD_S)
+        requester_tokens.refresh()
+        await manager.drop_revoked_requesters()
+
+@asynccontextmanager
+async def lifespan(app):
+    requester_tokens.refresh()
+    if requester_tokens.file_mode:
+        print(f"[grid] Requester-Tokens aus {REQUESTER_TOKENS_FILE} ({len(requester_tokens.entries)} Einträge)", flush=True)
+    else:
+        print(f"[grid] Requester-Zugang: /requester#token={REQUESTER_TOKEN}", flush=True)
+    if WORKER_TOKEN:
+        print("[grid] Worker benötigen Token: /worker#token=<GRID_WORKER_TOKEN>", flush=True)
+    watcher = asyncio.create_task(watch_requester_tokens())
+    try:
+        yield
+    finally:
+        watcher.cancel()
+
+# app wird oben vor den Middlewares erzeugt, die Lifespan braucht aber manager
+app.router.lifespan_context = lifespan
 
 @app.get("/")
 async def get_index(): return FileResponse("index.html")
@@ -295,7 +421,7 @@ async def worker_endpoint(websocket: WebSocket):
     if len(manager.active_workers) >= MAX_WORKERS:
         await websocket.close(code=1013)
         return
-    if not await authenticate(websocket, WORKER_TOKEN):
+    if await authenticate(websocket, check_worker_token) is None:
         return
     worker_id = await manager.connect_worker(websocket)
     try:
@@ -325,9 +451,10 @@ async def requester_endpoint(websocket: WebSocket):
     if len(manager.requesters) >= MAX_REQUESTERS:
         await websocket.close(code=1013)
         return
-    if not await authenticate(websocket, REQUESTER_TOKEN):
+    auth = await authenticate(websocket, requester_tokens.check)
+    if auth is None:
         return
-    requester_id = await manager.connect_requester(websocket)
+    requester_id = await manager.connect_requester(websocket, auth)
     try:
         limiter = RateLimiter()
         while True:
@@ -344,7 +471,38 @@ async def requester_endpoint(websocket: WebSocket):
     finally:
         await manager.disconnect_requester(requester_id)
 
+def manage_tokens(command, name):
+    # CLI: Tokens in REQUESTER_TOKENS_FILE anlegen/entfernen; der laufende Server übernimmt das sofort
+    entries = read_token_file(REQUESTER_TOKENS_FILE) if os.path.exists(REQUESTER_TOKENS_FILE) else []
+    names = [n for n, _ in entries]
+    if command == "list-requesters":
+        print("\n".join(names) if names else f"keine Einträge in {REQUESTER_TOKENS_FILE}")
+        return
+    if not name or not TOKEN_NAME_RE.fullmatch(name):
+        raise SystemExit("Name fehlt oder ungültig (erlaubt: A-Z a-z 0-9 _ . -, max. 64 Zeichen)")
+    if command == "add-requester":
+        if name in names:
+            raise SystemExit(f"{name} existiert schon; erst remove-requester {name}")
+        token = secrets.token_urlsafe(24)
+        write_token_file(REQUESTER_TOKENS_FILE, entries + [(name, token_hash(token))])
+        print(f"Requester {name} angelegt. Link (wird nicht gespeichert, nur jetzt sichtbar):")
+        print(f"  /requester#token={token}")
+        if not entries:
+            print("Hinweis: ab jetzt gelten nur noch Tokens aus der Datei, der gemeinsame Token nicht mehr.")
+    elif command == "remove-requester":
+        if name not in names:
+            raise SystemExit(f"{name} nicht gefunden")
+        write_token_file(REQUESTER_TOKENS_FILE, [e for e in entries if e[0] != name])
+        print(f"Requester {name} entfernt; offene Verbindungen werden innerhalb von {TOKEN_RELOAD_S}s getrennt.")
+
+TOKEN_COMMANDS = ("add-requester", "remove-requester", "list-requesters")
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        if sys.argv[1] not in TOKEN_COMMANDS or len(sys.argv) > 3:
+            raise SystemExit(f"Aufruf: python3 main.py [{' | '.join(TOKEN_COMMANDS)}] [NAME]")
+        manage_tokens(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None)
+        raise SystemExit(0)
     import uvicorn
     tls = bool(SSL_CERTFILE and SSL_KEYFILE)
     # Ohne TLS gingen Token und Signaling im Klartext durchs Netz -> nur lokal erlauben

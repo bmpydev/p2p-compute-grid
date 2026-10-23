@@ -28,3 +28,7 @@ desktop.ini
 .idea/
 *.swp
 *.swo
+
+# --- GRID ---
+requester_tokens.txt
+requester_tokens.txt.tmp

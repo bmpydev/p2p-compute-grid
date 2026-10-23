@@ -3,7 +3,7 @@
 Startet main.app mit kleinen Limits (limits_app.py) auf einem freien Port.
 Ausführen im Repo-Wurzelverzeichnis:  python3 -m unittest discover -s tests/server -v
 """
-import asyncio, http.client, json, os, socket, subprocess, sys, tempfile, time, unittest
+import asyncio, http.client, json, os, re, socket, stat, subprocess, sys, tempfile, time, unittest
 import websockets
 from websockets.protocol import State
 
@@ -12,6 +12,8 @@ TOKEN = "test-token"
 PORT = None
 SERVER = None
 SERVER_LOG = None
+# Eine echte requester_tokens.txt im Repo darf die Tests nicht in den Datei-Modus schalten
+NO_TOKEN_FILE = os.path.join(tempfile.mkdtemp(), "requester_tokens.txt")
 
 
 def free_port():
@@ -33,6 +35,7 @@ def wait_for_port(host, port, timeout=15):
 
 def server_env(**extra):
     env = {k: v for k, v in os.environ.items() if not k.startswith("GRID_")}
+    env["GRID_REQUESTER_TOKENS_FILE"] = NO_TOKEN_FILE
     env.update(extra)
     return env
 
@@ -303,6 +306,93 @@ class HostOriginTests(unittest.TestCase):
         res = conn.getresponse()
         self.assertEqual(res.getheader("Content-Security-Policy"), "default-src 'none'; script-src 'unsafe-eval'")
         conn.close()
+
+
+class TokenFileTests(unittest.IsolatedAsyncioTestCase):
+    # Eigener Server mit eigener Token-Datei, Tokens werden über die CLI verwaltet
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.TemporaryDirectory()
+        cls.file = os.path.join(cls.dir.name, "tokens.txt")
+        cls.port = free_port()
+        cls.log = tempfile.TemporaryFile()
+        cls.server = subprocess.Popen([sys.executable, "main.py"], cwd=ROOT, stdout=cls.log, stderr=subprocess.STDOUT,
+                                      env=server_env(GRID_PORT=str(cls.port), GRID_REQUESTER_TOKEN=TOKEN,
+                                                     GRID_REQUESTER_TOKENS_FILE=cls.file))
+        if not wait_for_port("127.0.0.1", cls.port):
+            cls.server.kill()
+            raise RuntimeError("Testserver startet nicht")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.terminate()
+        cls.server.wait(5)
+        cls.log.seek(0)
+        log = cls.log.read().decode(errors="replace")
+        cls.dir.cleanup()
+        if "Traceback" in log:
+            raise AssertionError("Server-Log enthält Exceptions:\n" + log)
+
+    def cli(self, *args, file=None):
+        return subprocess.run([sys.executable, "main.py", *args], cwd=ROOT, capture_output=True, text=True,
+                              env=server_env(GRID_REQUESTER_TOKENS_FILE=file or self.file), timeout=15)
+
+    def add(self, name, file=None):
+        res = self.cli("add-requester", name, file=file)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return re.search(r"#token=(\S+)", res.stdout).group(1)
+
+    async def connect(self, token):
+        # Liefert den offenen Socket oder None, wenn der Server mit 1008 ablehnt
+        ws = await websockets.connect(f"ws://127.0.0.1:{self.port}/ws/requester")
+        await ws.send(auth(token))
+        try:
+            msg = await recv_json(ws, 3)
+        except websockets.ConnectionClosed:
+            msg = None
+        if msg and msg["type"] == "init_workers":
+            return ws
+        await asyncio.wait_for(ws.wait_closed(), 3)
+        self.assertEqual(ws.close_code, 1008)
+        return None
+
+    async def test_tokens_are_managed_at_runtime(self):
+        shared = await self.connect(TOKEN)
+        self.assertIsNotNone(shared, "ohne Datei gilt der gemeinsame Token")
+
+        alice = self.add("alice")
+        bob = self.add("bob")
+        with open(self.file) as f:
+            content = f.read()
+        self.assertNotIn(alice, content, "Datei enthält nur Hashes")
+        self.assertEqual(stat.S_IMODE(os.stat(self.file).st_mode), 0o600)
+
+        # Ab jetzt nur Datei-Tokens: offene Sitzung mit dem gemeinsamen Token wird getrennt
+        await asyncio.wait_for(shared.wait_closed(), 5)
+        self.assertEqual(shared.close_code, 1008)
+        self.assertIsNone(await self.connect(TOKEN))
+
+        a, b = await self.connect(alice), await self.connect(bob)
+        self.assertIsNotNone(a)
+        self.assertIsNotNone(b)
+
+        # Entziehen ohne Neustart: bob fliegt raus, alice bleibt
+        self.assertEqual(self.cli("remove-requester", "bob").returncode, 0)
+        await asyncio.wait_for(b.wait_closed(), 5)
+        self.assertEqual(b.close_code, 1008)
+        self.assertIsNone(await self.connect(bob))
+        self.assertTrue(await is_alive(a))
+        self.assertEqual(self.cli("list-requesters").stdout.split(), ["alice"])
+        await a.close()
+
+    def test_cli_rejects_duplicate_and_invalid_names(self):
+        # Eigene Datei, damit der laufende Server davon nichts mitbekommt
+        file = os.path.join(self.dir.name, "cli.txt")
+        self.add("carol", file=file)
+        for args in (("add-requester", "carol"), ("add-requester", "a b"), ("add-requester", "../x"),
+                     ("remove-requester", "niemand"), ("unbekannt",)):
+            with self.subTest(args):
+                self.assertNotEqual(self.cli(*args, file=file).returncode, 0)
 
 
 class StartupTests(unittest.TestCase):

@@ -5,6 +5,7 @@ import puppeteer from 'puppeteer-core';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -28,7 +29,8 @@ async function startServer() {
     const port = await freePort();
     const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GRID_')));
     const proc = spawn('python3', ['main.py'], {
-        cwd: ROOT, env: { ...env, GRID_PORT: String(port), GRID_REQUESTER_TOKEN: TOKEN }, stdio: ['ignore', 'pipe', 'pipe'],
+        cwd: ROOT, env: { ...env, GRID_PORT: String(port), GRID_REQUESTER_TOKEN: TOKEN,
+            GRID_REQUESTER_TOKENS_FILE: path.join(os.tmpdir(), `grid-no-tokens-${process.pid}.txt`) }, stdio: ['ignore', 'pipe', 'pipe'],
     });
     let log = '';
     proc.stdout.on('data', d => log += d);

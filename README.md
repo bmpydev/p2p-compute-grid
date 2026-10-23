@@ -47,6 +47,7 @@ environment variables:
 | `GRID_ALLOWED_HOSTS` | – | Extra host names/IPs (comma-separated) the grid may be reached under, e.g. `grid.example.com,192.168.1.10`. `localhost`, `127.0.0.1` and `::1` are always allowed. |
 | `GRID_ALLOW_INSECURE` | – | `1` allows a non-loopback bind without TLS (tokens travel in plain text). |
 | `GRID_REQUESTER_TOKEN` / `GRID_WORKER_TOKEN` | random / – | See below. |
+| `GRID_REQUESTER_TOKENS_FILE` | `requester_tokens.txt` | Per-person requester tokens, see below. |
 
 Example for a LAN with TLS:
 ```bash
@@ -65,11 +66,29 @@ name to `GRID_ALLOWED_HOSTS` and forward the original `Host` header.
 3.  Open /requester to start a rendering or data analysis job. Requesters must
     authenticate: on startup the server prints the link
     `/requester#token=...`. Set `GRID_REQUESTER_TOKEN` for a fixed token,
-    otherwise a random one is generated on every start.
+    otherwise a random one is generated on every start. For one token per
+    person, see [Requester tokens](#requester-tokens).
 4.  Optional: set `GRID_WORKER_TOKEN` to only allow workers that open
     `/worker#token=<GRID_WORKER_TOKEN>`. Without it, anyone who can reach the
     server can join as worker – see [Trust model](#trust-model) before exposing
     the grid beyond your own machines.
+
+### Requester tokens
+
+Instead of one shared token, every requester can get their own. Tokens are
+managed while the server is running, no restart needed:
+
+```bash
+python3 main.py add-requester alice     # prints alice's link once
+python3 main.py remove-requester alice  # alice is disconnected within 2 s
+python3 main.py list-requesters
+```
+
+The tokens are stored in `requester_tokens.txt` (only their SHA-256 hashes,
+file mode `0600`, git-ignored). If a link gets lost, remove the person and add
+them again. As soon as this file exists, only its tokens are accepted – the
+shared `GRID_REQUESTER_TOKEN` stops working and open sessions using it are
+closed. The server log shows which requester connected.
 
 ### Tests
 
