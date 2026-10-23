@@ -46,8 +46,7 @@
         import init, { run_benchmark } from '/pkg/rust_worker.js';
 
         let subWorkers = [];
-        let dataChannel = null;
-        let headerQueue = [];
+        const peers = {}; // requester_id: {pc, dc, headerQueue}
         let globalWS = null;
 
         async function run() {
@@ -75,7 +74,6 @@
 
             // Signaling Connection (WebSocket) - only once
             globalWS = new WebSocket("ws://" + window.location.host + "/ws/worker");
-            let pc;
 
             globalWS.onopen = () => {
                 console.log("Signaling online. Syncing performance metrics...");
@@ -93,27 +91,32 @@
 
             globalWS.onmessage = async (event) => {
                 const msg = JSON.parse(event.data);
+                const rid = msg.requester_id;
 
                 if (msg.type === "offer") {
+                    // Eine Peer-Verbindung pro Requester; erneutes Offer ersetzt nur die eigene
+                    closePeer(rid);
                     document.getElementById("p2pStatus").innerText = "Connect P2P...";
-                    pc = new RTCPeerConnection({
+                    const pc = new RTCPeerConnection({
                         iceServers: [
                             { urls: "stun:stun.l.google.com:19302" },
                             { urls: "stun:stun1.l.google.com:19302" }
                         ]
                     });
+                    const peer = { pc, dc: null, headerQueue: [] };
+                    peers[rid] = peer;
 
                     pc.onicecandidate = (e) => {
-                        if (e.candidate) globalWS.send(JSON.stringify({type: "ice", candidate: e.candidate}));
+                        if (e.candidate) globalWS.send(JSON.stringify({type: "ice", requester_id: rid, candidate: e.candidate}));
                     };
 
                     pc.ondatachannel = (event) => {
-                        dataChannel = event.channel;
+                        const dataChannel = event.channel;
                         dataChannel.binaryType = "arraybuffer";
+                        peer.dc = dataChannel;
 
                         dataChannel.onopen = () => {
-                            document.getElementById("p2pStatus").innerText = "READY";
-                            document.getElementById("p2pStatus").style.color = "#4CAF50";
+                            updateP2PStatus();
                             // Info to Requester (for List)
                             dataChannel.send(JSON.stringify({
                                 type: "WORKER_INFO",
@@ -121,6 +124,7 @@
                                 cores: parseInt(slider.value)
                             }));
                         };
+                        dataChannel.onclose = updateP2PStatus;
 
                         dataChannel.onmessage = (e) => {
                             if (typeof e.data === "string") {
@@ -132,14 +136,14 @@
                                 }
 
                                 if (msg.type === "MANDELBROT") {
-                                    dispatch(msg, null);
+                                    dispatch(msg, null, rid);
                                 } else {
-                                    headerQueue.push(msg);
+                                    peer.headerQueue.push(msg);
                                 }
                             } else {
-                                const header = headerQueue.shift();
+                                const header = peer.headerQueue.shift();
                                 if (header) {
-                                    dispatch(header, e.data);
+                                    dispatch(header, e.data, rid);
                                 }
                             }
                         };
@@ -148,12 +152,33 @@
                     await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
                     const answer = await pc.createAnswer();
                     await pc.setLocalDescription(answer);
-                    globalWS.send(JSON.stringify({type: "answer", sdp: answer}));
+                    globalWS.send(JSON.stringify({type: "answer", requester_id: rid, sdp: answer}));
                 }
-                else if (msg.type === "ice" && pc) {
-                    await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+                else if (msg.type === "ice" && peers[rid]) {
+                    await peers[rid].pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+                }
+                else if (msg.type === "requester_left") {
+                    closePeer(rid);
                 }
             };
+        }
+
+        function closePeer(rid) {
+            if (!peers[rid]) return;
+            peers[rid].pc.close();
+            delete peers[rid];
+            updateP2PStatus();
+        }
+
+        function openChannels() {
+            return Object.values(peers).filter(p => p.dc && p.dc.readyState === "open").map(p => p.dc);
+        }
+
+        function updateP2PStatus() {
+            const n = openChannels().length;
+            const el = document.getElementById("p2pStatus");
+            el.innerText = n ? `READY (${n} requester${n > 1 ? "s" : ""})` : "Waiting for Connection...";
+            el.style.color = n ? "#4CAF50" : "#FF9800";
         }
 
         function setupThreads(count) {
@@ -164,9 +189,11 @@
             for(let i = 0; i < count; i++) {
                 const w = new Worker('/compute_node.js', { type: 'module' });
                 w.onmessage = (e) => {
-                    // Result from Sub-Worker -> back to P2P
+                    // Result from Sub-Worker -> back to the requester that sent the task
+                    const { _rid, ...metadata } = e.data.metadata;
+                    const dataChannel = peers[_rid]?.dc;
                     if (dataChannel && dataChannel.readyState === "open") {
-                        dataChannel.send(JSON.stringify(e.data.metadata));
+                        dataChannel.send(JSON.stringify(metadata));
                         dataChannel.send(e.data.pixels);
                     }
                 };
@@ -174,15 +201,13 @@
             }
 
             // Scaling capacity
-            if (dataChannel && dataChannel.readyState === "open") {
-                dataChannel.send(JSON.stringify({type: "WORKER_INFO", cores: count}));
-            }
+            openChannels().forEach(dc => dc.send(JSON.stringify({type: "WORKER_INFO", cores: count})));
         }
 
-        function dispatch(header, pixels) {
+        function dispatch(header, pixels, rid) {
             // Dispatch task to a random available sub-worker
             const worker = subWorkers[Math.floor(Math.random() * subWorkers.length)];
-            worker.postMessage({ header, pixels }, [pixels]);
+            worker.postMessage({ header: { ...header, _rid: rid }, pixels }, pixels ? [pixels] : []);
         }
 
         run().catch(err => console.error("Worker Boot Error:", err));

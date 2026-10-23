@@ -51,7 +51,7 @@ def get_geo_info(ip):
 class ConnectionManager:
     def __init__(self):
         self.active_workers = {} # id: {"ws": websocket, "geo": geo}
-        self.requester = None
+        self.requesters = {} # id: websocket
         self.stats_listeners = set() # Neu: Alle Besucher der index.html
         self.total_verified_jobs = 0 # Neu: Globaler Zähler
 
@@ -76,35 +76,57 @@ class ConnectionManager:
         worker_id = str(uuid.uuid4())[:8]
         geo = get_geo_info(websocket.client.host)
         self.active_workers[worker_id] = {"ws": websocket, "geo": geo}
-        if self.requester:
-            await self.requester.send_text(json.dumps({
-                "type": "new_worker",
-                "worker_id": worker_id,
-                "geo": geo
-            }))
+        await self.broadcast_to_requesters({
+            "type": "new_worker",
+            "worker_id": worker_id,
+            "geo": geo
+        })
         return worker_id
         await self.broadcast_stats()
 
     async def connect_requester(self, websocket: WebSocket):
-        self.requester = websocket
+        requester_id = str(uuid.uuid4())[:8]
+        self.requesters[requester_id] = websocket
         # WICHTIG: Liste von Objekten senden
         workers_list = [{"id": k, "geo": v["geo"]} for k, v in self.active_workers.items()]
         await websocket.send_text(json.dumps({
             "type": "init_workers",
             "workers": workers_list
         }))
+        return requester_id
 
     def disconnect_worker(self, worker_id: str):
         if worker_id in self.active_workers:
             del self.active_workers[worker_id]
 
-    async def forward_to_worker(self, target_id: str, message: dict):
+    async def disconnect_requester(self, requester_id: str):
+        self.requesters.pop(requester_id, None)
+        # Worker bauen ihre Peer-Verbindung zu diesem Requester ab
+        for worker in list(self.active_workers.values()):
+            try:
+                await worker["ws"].send_text(json.dumps({"type": "requester_left", "requester_id": requester_id}))
+            except Exception:
+                pass
+
+    async def broadcast_to_requesters(self, message: dict):
+        data = json.dumps(message)
+        for ws in list(self.requesters.values()):
+            try:
+                await ws.send_text(data)
+            except Exception:
+                pass
+
+    async def forward_to_worker(self, requester_id: str, target_id: str, message: dict):
         if target_id in self.active_workers:
+            # Absender setzt der Server, nicht der Client -> nicht fälschbar
+            message["requester_id"] = requester_id
             await self.active_workers[target_id]["ws"].send_text(json.dumps(message))
 
     async def send_to_requester(self, message: dict):
-        if self.requester:
-            await self.requester.send_text(json.dumps(message))
+        requester_id = message.get("requester_id")
+        ws = self.requesters.get(requester_id) if isinstance(requester_id, str) else None
+        if ws:
+            await ws.send_text(json.dumps(message))
             await self.broadcast_stats()
 
 manager = ConnectionManager()
@@ -164,7 +186,7 @@ async def worker_endpoint(websocket: WebSocket):
 async def requester_endpoint(websocket: WebSocket):
     if not await authenticate(websocket, REQUESTER_TOKEN):
         return
-    await manager.connect_requester(websocket)
+    requester_id = await manager.connect_requester(websocket)
     try:
         while True:
             data = await websocket.receive_text()
@@ -174,9 +196,9 @@ async def requester_endpoint(websocket: WebSocket):
                 manager.total_verified_jobs += 1
                 await manager.broadcast_stats()
             elif "target_id" in msg:
-                await manager.forward_to_worker(msg["target_id"], msg)
+                await manager.forward_to_worker(requester_id, msg["target_id"], msg)
     except WebSocketDisconnect:
-        manager.requester = None
+        await manager.disconnect_requester(requester_id)
 
 if __name__ == "__main__":
     import uvicorn
