@@ -1,4 +1,4 @@
-import uuid, json, os, requests, asyncio, hmac, secrets
+import uuid, json, os, requests, asyncio, hmac, secrets, math, time
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -14,6 +14,15 @@ REQUESTER_TOKEN = os.environ.get("GRID_REQUESTER_TOKEN") or secrets.token_urlsaf
 # Worker sind optional geschützt (offenes Volunteer-Grid, solange nicht gesetzt).
 WORKER_TOKEN = os.environ.get("GRID_WORKER_TOKEN")
 AUTH_TIMEOUT_S = 5
+
+# Limits gegen Ressourcen-DoS (Signaling-Nachrichten sind nur wenige KB groß)
+MAX_MESSAGE_BYTES = 64 * 1024
+MAX_WORKERS = 1000
+MAX_REQUESTERS = 20
+MAX_STATS_LISTENERS = 500
+MSG_RATE = 50       # Nachrichten pro Sekunde je Verbindung ...
+MSG_BURST = 200     # ... mit kurzzeitigem Puffer (ICE-Bursts beim Verbindungsaufbau)
+MAX_SCORE = 1_000_000
 print(f"[grid] Requester-Zugang: /requester#token={REQUESTER_TOKEN}", flush=True)
 if WORKER_TOKEN:
     print("[grid] Worker benötigen Token: /worker#token=<GRID_WORKER_TOKEN>", flush=True)
@@ -26,7 +35,7 @@ async def authenticate(websocket: WebSocket, expected_token):
         token = msg.get("token") if isinstance(msg, dict) and msg.get("type") == "auth" else None
         ok = isinstance(token, str) and (
             expected_token is None or hmac.compare_digest(token.encode(), expected_token.encode()))
-    except (asyncio.TimeoutError, WebSocketDisconnect, ValueError):
+    except (asyncio.TimeoutError, WebSocketDisconnect, ValueError, KeyError):
         ok = False
     if not ok:
         try:
@@ -34,6 +43,41 @@ async def authenticate(websocket: WebSocket, expected_token):
         except Exception:
             pass
     return ok
+
+class RateLimiter:
+    # Token-Bucket je Verbindung. Bremst statt zu verwerfen, damit kein ICE verloren geht;
+    # ein Flood blockiert nur die eigene Verbindung.
+    def __init__(self, rate=MSG_RATE, burst=MSG_BURST):
+        self.rate, self.burst = rate, burst
+        self.tokens, self.last = burst, time.monotonic()
+
+    async def wait(self):
+        now = time.monotonic()
+        self.tokens = min(self.burst, self.tokens + (now - self.last) * self.rate)
+        self.last = now
+        if self.tokens < 1:
+            await asyncio.sleep((1 - self.tokens) / self.rate)
+            self.tokens, self.last = 1, time.monotonic()
+        self.tokens -= 1
+
+async def receive_json(websocket: WebSocket, limiter: RateLimiter):
+    # Liefert ein dict oder None (Binärframe, zu groß, kein JSON-Objekt -> ignorieren)
+    message = await websocket.receive()
+    if message["type"] == "websocket.disconnect":
+        raise WebSocketDisconnect(message.get("code", 1000))
+    await limiter.wait()
+    data = message.get("text")
+    if data is None or len(data) > MAX_MESSAGE_BYTES:
+        return None
+    try:
+        msg = json.loads(data)
+    except ValueError:
+        return None
+    return msg if isinstance(msg, dict) else None
+
+def valid_score(score):
+    return (isinstance(score, (int, float)) and not isinstance(score, bool)
+            and math.isfinite(score) and 0 <= score <= MAX_SCORE)
 
 def get_geo_info(ip):
     if ip == "127.0.0.1" or ip == "localhost":
@@ -55,22 +99,24 @@ class ConnectionManager:
         self.stats_listeners = set() # Neu: Alle Besucher der index.html
         self.total_verified_jobs = 0 # Neu: Globaler Zähler
 
-    async def broadcast_stats(self):
+    def stats_payload(self):
         # Berechnet die aktuellen Werte für alle
         total_power = sum(v.get("score", 0) for v in self.active_workers.values())
-        countries = [v["geo"]["countryCode"] for v in self.active_workers.values()]
-        data = json.dumps({
+        return json.dumps({
             "type": "global_stats_update",
             "nodes": len(self.active_workers),
             "power": total_power,
             "jobs": self.total_verified_jobs,
             "countries": [v["geo"]["countryCode"] for v in self.active_workers.values()]
         })
+
+    async def broadcast_stats(self):
+        data = self.stats_payload()
         for listener in list(self.stats_listeners):
             try:
                 await listener.send_text(data)
-            except:
-                self.stats_listeners.remove(listener)
+            except Exception:
+                self.stats_listeners.discard(listener)
 
     async def connect_worker(self, websocket: WebSocket):
         worker_id = str(uuid.uuid4())[:8]
@@ -89,10 +135,14 @@ class ConnectionManager:
         self.requesters[requester_id] = websocket
         # WICHTIG: Liste von Objekten senden
         workers_list = [{"id": k, "geo": v["geo"]} for k, v in self.active_workers.items()]
-        await websocket.send_text(json.dumps({
-            "type": "init_workers",
-            "workers": workers_list
-        }))
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "init_workers",
+                "workers": workers_list
+            }))
+        except Exception:
+            self.requesters.pop(requester_id, None)
+            raise
         return requester_id
 
     def disconnect_worker(self, worker_id: str):
@@ -120,14 +170,19 @@ class ConnectionManager:
         if target_id in self.active_workers:
             # Absender setzt der Server, nicht der Client -> nicht fälschbar
             message["requester_id"] = requester_id
-            await self.active_workers[target_id]["ws"].send_text(json.dumps(message))
+            try:
+                await self.active_workers[target_id]["ws"].send_text(json.dumps(message))
+            except Exception:
+                pass # Worker gerade weg; sein Handler räumt auf
 
     async def send_to_requester(self, message: dict):
         requester_id = message.get("requester_id")
         ws = self.requesters.get(requester_id) if isinstance(requester_id, str) else None
         if ws:
-            await ws.send_text(json.dumps(message))
-            await self.broadcast_stats()
+            try:
+                await ws.send_text(json.dumps(message))
+            except Exception:
+                pass # Requester gerade weg; sein Handler räumt auf
 
 manager = ConnectionManager()
 
@@ -154,52 +209,76 @@ async def get_sandbox_worker():
 
 @app.websocket("/ws/stats")
 async def stats_endpoint(websocket: WebSocket):
+    if len(manager.stats_listeners) >= MAX_STATS_LISTENERS:
+        await websocket.close(code=1013)
+        return
     await websocket.accept()
     manager.stats_listeners.add(websocket)
-    await manager.broadcast_stats()
     try:
-        while True: await websocket.receive_text() # Offen halten
-    except: manager.stats_listeners.remove(websocket)
+        # Nur dem neuen Besucher senden, nicht allen (sonst Verstärkung per Connect-Flood)
+        await websocket.send_text(manager.stats_payload())
+        limiter = RateLimiter()
+        while True: await receive_json(websocket, limiter) # Offen halten
+    except WebSocketDisconnect:
+        pass
+    finally:
+        manager.stats_listeners.discard(websocket)
 
 @app.websocket("/ws/worker")
 async def worker_endpoint(websocket: WebSocket):
+    if len(manager.active_workers) >= MAX_WORKERS:
+        await websocket.close(code=1013)
+        return
     if not await authenticate(websocket, WORKER_TOKEN):
         return
     worker_id = await manager.connect_worker(websocket)
-    await manager.broadcast_stats()
     try:
+        await manager.broadcast_stats()
+        limiter = RateLimiter()
         while True:
-            data = await websocket.receive_text()
-            msg = json.loads(data)
-            # NEU: Worker meldet seinen Score an den Server für die index.html
+            msg = await receive_json(websocket, limiter)
+            if msg is None:
+                continue
+            # Worker meldet seinen Score an den Server für die index.html
             if msg.get("type") == "report_score":
-                manager.active_workers[worker_id]["score"] = msg["score"]
-                await manager.broadcast_stats()
-            else:
+                if valid_score(msg.get("score")):
+                    manager.active_workers[worker_id]["score"] = msg["score"]
+                    await manager.broadcast_stats()
+            elif msg.get("type") in ("answer", "ice"):
                 msg["worker_id"] = worker_id
                 await manager.send_to_requester(msg)
     except WebSocketDisconnect:
+        pass
+    finally:
+        # Auch bei unerwarteten Fehlern keine Geister-Worker zurücklassen
         manager.disconnect_worker(worker_id)
         await manager.broadcast_stats()
 
 @app.websocket("/ws/requester")
 async def requester_endpoint(websocket: WebSocket):
+    if len(manager.requesters) >= MAX_REQUESTERS:
+        await websocket.close(code=1013)
+        return
     if not await authenticate(websocket, REQUESTER_TOKEN):
         return
     requester_id = await manager.connect_requester(websocket)
     try:
+        limiter = RateLimiter()
         while True:
-            data = await websocket.receive_text()
-            msg = json.loads(data)
-            # NEU: Hier kommt dein Schnipsel hin!
+            msg = await receive_json(websocket, limiter)
+            if msg is None:
+                continue
             if msg.get("type") == "report_job":
                 manager.total_verified_jobs += 1
                 await manager.broadcast_stats()
-            elif "target_id" in msg:
+            elif msg.get("type") in ("offer", "ice") and isinstance(msg.get("target_id"), str):
                 await manager.forward_to_worker(requester_id, msg["target_id"], msg)
     except WebSocketDisconnect:
+        pass
+    finally:
         await manager.disconnect_requester(requester_id)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Frames über dem Limit verwirft uvicorn schon beim Empfang (bei uvicorn-CLI: --ws-max-size 65536)
+    uvicorn.run(app, host="0.0.0.0", port=8000, ws_max_size=MAX_MESSAGE_BYTES)
