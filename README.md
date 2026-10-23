@@ -84,11 +84,17 @@ python3 main.py remove-requester alice  # alice is disconnected within 2 s
 python3 main.py list-requesters
 ```
 
+`add-requester` prints only the path `/requester#token=...`; prefix it with the
+address the server is reachable under, e.g.
+`http://localhost:8000/requester#token=...`.
+
 The tokens are stored in `requester_tokens.txt` (only their SHA-256 hashes,
 file mode `0600`, git-ignored). If a link gets lost, remove the person and add
 them again. As soon as this file exists, only its tokens are accepted – the
 shared `GRID_REQUESTER_TOKEN` stops working and open sessions using it are
-closed. The server log shows which requester connected.
+closed. Deleting the file locks out all requesters until the server is
+restarted; after a restart without the file, the shared token applies again.
+The server log shows which requester connected.
 
 ### Tests
 
