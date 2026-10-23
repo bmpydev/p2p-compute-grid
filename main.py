@@ -160,7 +160,6 @@ class ConnectionManager:
             "worker_id": worker_id
         })
         return worker_id
-        await self.broadcast_stats()
 
     async def connect_requester(self, websocket: WebSocket):
         requester_id = str(uuid.uuid4())[:8]
