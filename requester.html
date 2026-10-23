@@ -437,7 +437,9 @@ window.onload = () => {
             currentFrame: 0,
             currentCustomCode: "",
             requiredRedundancy: 2,
-            pendingResults: {}
+            pendingResults: {},
+            agreeCount: {},      // tileId: Größe der größten Gruppe identischer Ergebnisse
+            unverifiedTiles: 0
         };
 
         ws.onmessage = async (event) => {
@@ -469,7 +471,14 @@ window.onload = () => {
                 updateUI(workerId);
                 assignTasks();
             };
-            dc.onclose = () => { peers[workerId].status = 'offline'; updateUI(workerId); };
+            dc.onclose = () => {
+                peers[workerId].status = 'offline';
+                peers[workerId].activeTasks = 0;
+                // Laufende Tasks dieses Workers freigeben, damit andere sie übernehmen
+                scheduler.tasks.forEach(t => t.assignedTo?.delete(workerId));
+                updateUI(workerId);
+                assignTasks();
+            };
 
             let lastMeta = null;
             dc.onmessage = (e) => {
@@ -492,61 +501,107 @@ window.onload = () => {
             ws.send(JSON.stringify({type:"offer", target_id:workerId, sdp:offer}));
         }
 
+        // Ergebnis-Verifikation: Ein Tile gilt erst als verifiziert, wenn requiredRedundancy
+        // verschiedene Worker byte-identische Ergebnisse geliefert haben.
+        function sameBytes(a, b) {
+            if (a.length !== b.length) return false;
+            for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+            return true;
+        }
+
+        function largestAgreement(results) {
+            let best = [];
+            for (const r of results) {
+                if (!r.valid) continue;
+                const group = results.filter(o => o.valid && sameBytes(o.pixels, r.pixels));
+                if (group.length > best.length) best = group;
+            }
+            return best;
+        }
+
+        function availableWorkerIds() {
+            return Object.keys(peers).filter(id => peers[id].status !== 'offline' && peers[id].dc?.readyState === "open");
+        }
+
         function handleResult(workerId, meta, pixels) {
             if (!peers[workerId] || !meta) return;
             const p = peers[workerId];
+            // Nur Ergebnisse zu Tasks annehmen, die dieser Worker gerade bearbeitet;
+            // Position/Größe kommen aus dem eigenen Task, nie aus den Worker-Metadaten
+            const task = scheduler.tasks.find(t => t.tileId === meta.tileId);
+            if (!task || !task.assignedTo?.has(workerId)) return;
+            task.assignedTo.delete(workerId);
             p.activeTasks = Math.max(0, p.activeTasks - 1);
             p.tilesDone++;
 
-            if (!scheduler.pendingResults[meta.tileId]) scheduler.pendingResults[meta.tileId] = [];
-            if (!scheduler.pendingResults[meta.tileId].some(r => r.workerId === workerId)) {
-                scheduler.pendingResults[meta.tileId].push({ workerId, pixels });
-            }
+            const valid = task.w === undefined || pixels.length === task.w * task.h * 4;
+            if (!valid) logToConsole(`> Tile ${task.tileId}: invalid result from ${workerId} discarded`);
+            const results = scheduler.pendingResults[task.tileId] ||= [];
+            results.push({ workerId, pixels, valid });
 
-            const results = scheduler.pendingResults[meta.tileId];
-            const threshold = Math.min(scheduler.requiredRedundancy, Object.keys(peers).length);
-
-            if (results.length >= threshold) {
-                const res1 = results[0].pixels;
-                if (!scheduler.finalImages.has(meta.tileId)) {
-                    scheduler.finalImages.add(meta.tileId);
-
-                    if (meta.type === "DATA_RESULT") {
-                        logToConsole(`> Chunk ${meta.tileId} verified. Result Byte: ${res1[0]}`);
-                    } else {
-                        if (meta.frameId !== undefined) {
-                            if (!scheduler.framesData[meta.frameId]) scheduler.framesData[meta.frameId] = [];
-                            scheduler.framesData[meta.frameId].push({ x: meta.x, y: meta.y, w: meta.w, h: meta.h, pixels: res1 });
-                        }
-                        const ctx = mainCanvas.getContext("2d");
-                        ctx.putImageData(new ImageData(new Uint8ClampedArray(res1), meta.w, meta.h), meta.x, meta.y);
-                    }
-
-                    finishedTiles++;
-                    document.getElementById("frameInfo").innerText = `Progress: ${finishedTiles} / ${totalTiles}`;
-                    if (finishedTiles === totalTiles) {
-                        document.getElementById("globalStatus").innerText = "COMPUTATION COMPLETED!";
-                        document.getElementById("playBtn").disabled = false;
-                    }
+            if (!scheduler.finalImages.has(task.tileId)) {
+                const agreeing = largestAgreement(results);
+                scheduler.agreeCount[task.tileId] = agreeing.length;
+                if (agreeing.length >= scheduler.requiredRedundancy) {
+                    const rejected = results.filter(r => !agreeing.includes(r)).map(r => r.workerId);
+                    if (rejected.length) logToConsole(`> Tile ${task.tileId}: mismatching result from ${rejected.join(", ")} rejected`);
+                    finishTile(task, agreeing[0].pixels);
+                } else if (results.length >= scheduler.requiredRedundancy && task.assignedTo.size === 0
+                           && availableWorkerIds().every(id => results.some(r => r.workerId === id))) {
+                    // Genug Ergebnisse, aber keine Mehrheit und kein Worker mehr übrig
+                    finishTile(task, null);
                 }
             }
             updateUI(workerId);
             assignTasks();
         }
 
+        function finishTile(task, pixels) {
+            scheduler.finalImages.add(task.tileId);
+            if (!pixels) {
+                scheduler.unverifiedTiles++;
+                logToConsole(`> Tile ${task.tileId}: CONFLICT - no ${scheduler.requiredRedundancy} matching results, discarded`);
+            } else if (task.type === "BIG_DATA") {
+                logToConsole(`> Chunk ${task.tileId} verified. Result Byte: ${pixels[0]}`);
+            } else {
+                if (task.frameId !== undefined) {
+                    if (!scheduler.framesData[task.frameId]) scheduler.framesData[task.frameId] = [];
+                    scheduler.framesData[task.frameId].push({ x: task.x, y: task.y, w: task.w, h: task.h, pixels });
+                }
+                const ctx = mainCanvas.getContext("2d");
+                ctx.putImageData(new ImageData(new Uint8ClampedArray(pixels), task.w, task.h), task.x, task.y);
+            }
+
+            finishedTiles++;
+            document.getElementById("frameInfo").innerText = `Progress: ${finishedTiles} / ${totalTiles}`;
+            if (finishedTiles === totalTiles) {
+                document.getElementById("globalStatus").innerText = scheduler.unverifiedTiles
+                    ? `COMPUTATION COMPLETED - ${scheduler.unverifiedTiles} TILE(S) WITHOUT CONSENSUS`
+                    : "COMPUTATION COMPLETED!";
+                document.getElementById("playBtn").disabled = false;
+            }
+        }
+
         function assignTasks() {
-            const availableWorkers = Object.keys(peers).filter(id =>
-                peers[id].status !== 'offline' && peers[id].dc?.readyState === "open"
-            );
+            const availableWorkers = availableWorkerIds();
+            const status = document.getElementById("globalStatus");
+            if (finishedTiles < totalTiles && availableWorkers.length < scheduler.requiredRedundancy) {
+                // Keine stille Absenkung der Redundanz: lieber warten als unverifiziert übernehmen
+                status.innerText = `WAITING FOR ${scheduler.requiredRedundancy} WORKERS TO VERIFY (${availableWorkers.length} CONNECTED)`;
+            } else if (status.innerText.startsWith("WAITING FOR")) {
+                status.innerText = "Cluster processing...";
+            }
 
             availableWorkers.forEach(workerId => {
                 const p = peers[workerId];
                 while (p.activeTasks < p.capacity) {
                     const task = scheduler.tasks.find(t => {
+                        if (scheduler.finalImages.has(t.tileId)) return false;
                         const res = scheduler.pendingResults[t.tileId] || [];
-                        const alreadyDoneByMe = res.some(r => r.workerId === workerId);
-                        const threshold = Math.min(scheduler.requiredRedundancy, availableWorkers.length);
-                        return !scheduler.finalImages.has(t.tileId) && res.length < threshold && !alreadyDoneByMe;
+                        const mine = t.assignedTo?.has(workerId) || res.some(r => r.workerId === workerId);
+                        // Nur so viele parallel vergeben, wie zur Mehrheit noch fehlen
+                        const missing = scheduler.requiredRedundancy - (scheduler.agreeCount[t.tileId] || 0);
+                        return !mine && (t.assignedTo?.size || 0) < missing;
                     });
 
                     if (!task) break;
@@ -641,6 +696,7 @@ window.onload = () => {
         function createTempCtx(w, h) { const c = document.createElement("canvas"); c.width = w; c.height = h; return c.getContext("2d"); }
         function prepareTasks(type) {
             scheduler.tasks = []; scheduler.finalImages.clear(); scheduler.framesData = {}; scheduler.pendingResults = {};
+            scheduler.agreeCount = {}; scheduler.unverifiedTiles = 0;
             scheduler.currentCustomCode = document.getElementById("customCode").value;
             finishedTiles = 0;
             document.getElementById("globalStatus").innerText = `Cluster processing: ${type}`;

@@ -9,7 +9,7 @@ This project turns every browser tab into a compute node, forming a decentralize
 - **High-Performance Kernels:** Image processing (Sobel, Inversion) powered by Rust compiled to WebAssembly.
 - **Custom Logic Injection:** Requesters can deploy custom JavaScript logic across the grid with near-native performance.
 - **Security Sandboxing:** Worker nodes execute custom code in a secured environment with restricted API access: custom code runs in a dedicated worker locked down by a strict Content-Security-Policy (no fetch/XHR/WebSocket, no script loading, no sub-workers) with a hard timeout.
-- **Result Verification:** Built-in redundancy system that cross-verifies results from multiple workers for data integrity.
+- **Result Verification:** A tile is only accepted once the configured number of distinct workers returned byte-identical results; mismatching results trigger recomputation by other workers, and tiles without consensus are discarded and reported.
 
 ## Tech Stack
 
