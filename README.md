@@ -69,6 +69,23 @@ name to `GRID_ALLOWED_HOSTS` and forward the original `Host` header.
 4.  Optional: set `GRID_WORKER_TOKEN` to only allow workers that open
     `/worker#token=<GRID_WORKER_TOKEN>`. Without it, anyone can join as worker.
 
+### Tests
+
+```bash
+# Rust kernels
+(cd rust_worker && cargo test)
+# Signaling server (standard library unittest + websockets, starts its own server)
+python3 -m unittest discover -s tests/server -v
+# Browser end-to-end (Firefox + Node.js; requires the built rust_worker/pkg)
+(cd tests/browser && npm install && npm test)
+```
+
+The browser tests drive headless Firefox (path via `FIREFOX`, default
+`/usr/bin/firefox`) and cover the sandbox (no network access, timeout), two
+requesters, result verification against a malicious worker, XSS via worker
+data and file names, WASM robustness and seamless Sobel tiles. Run a subset
+with e.g. `npm test -- sobel`.
+
 ### Security & Design Decisions
 
   - Transferable Objects: Used for zero-copy memory transfer between Workers and

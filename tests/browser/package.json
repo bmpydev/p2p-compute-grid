@@ -1,0 +1,11 @@
+{
+  "name": "p2p-compute-grid-browser-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node run.mjs"
+  },
+  "dependencies": {
+    "puppeteer-core": "24.43.1"
+  }
+}
