@@ -442,13 +442,13 @@ window.onload = () => {
 
         ws.onmessage = async (event) => {
             const msg = JSON.parse(event.data);
-            if (msg.type === "new_worker") setupP2P(msg.worker_id, msg.geo);
-            else if (msg.type === "init_workers") msg.workers.forEach(w => setupP2P(w.id || w, w.geo));
+            if (msg.type === "new_worker") setupP2P(msg.worker_id);
+            else if (msg.type === "init_workers") msg.workers.forEach(w => setupP2P(w.id));
             else if (msg.type === "answer" && peers[msg.worker_id]) peers[msg.worker_id].pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
             else if (msg.type === "ice" && peers[msg.worker_id]) peers[msg.worker_id].pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
         };
 
-        async function setupP2P(workerId, geo) {
+        async function setupP2P(workerId) {
             if (peers[workerId]) return;
             const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
             const dc = pc.createDataChannel("renderChannel");
@@ -456,7 +456,6 @@ window.onload = () => {
 
             peers[workerId] = {
                 pc, dc,
-                geo: geo || {country:"Unknown", countryCode:"LOCAL"},
                 status: 'connecting', tilesDone: 0, capacity: 1, activeTasks: 0, score: 0, ping: 0
             };
 
@@ -651,8 +650,7 @@ window.onload = () => {
         function updateUI(id) {
             const p = peers[id], card = document.getElementById(`card-${id}`);
             if(!card) return;
-            const getFlag = (c) => { if(c==="LOCAL") return "🏠"; if(c==="UNKNOWN") return "🌐"; return c.toUpperCase().replace(/./g, char => String.fromCodePoint(char.charCodeAt(0) + 127397)); };
-            card.innerHTML = `<div style="display:flex; justify-content:space-between;"><strong>${getFlag(p.geo.countryCode)} ${p.geo.country}</strong><small>${p.ping}ms</small></div>Threads: ${p.capacity} | Jobs: ${p.tilesDone}`;
+            card.innerHTML = `<div style="display:flex; justify-content:space-between;"><strong>Node ${id}</strong><small>${p.ping}ms</small></div>Threads: ${p.capacity} | Jobs: ${p.tilesDone}`;
             card.className = `worker-card ${p.activeTasks < p.capacity ? 'active' : 'busy'}`;
             calculateGlobalStats();
         }

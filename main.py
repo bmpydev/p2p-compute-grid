@@ -1,4 +1,4 @@
-import uuid, json, os, requests, asyncio, hmac, secrets, math, time
+import uuid, json, os, asyncio, hmac, secrets, math, time
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -127,22 +127,9 @@ def valid_score(score):
     return (isinstance(score, (int, float)) and not isinstance(score, bool)
             and math.isfinite(score) and 0 <= score <= MAX_SCORE)
 
-def get_geo_info(ip):
-    if ip == "127.0.0.1" or ip == "localhost":
-        return {"country": "Local Host", "countryCode": "LOC"}
-    try:
-        # Kostenlose API für Geo-Daten
-        res = requests.get(f"http://ip-api.com/json/{ip}", timeout=2).json()
-        return {
-            "country": res.get("country", "Unknown"),
-            "countryCode": res.get("countryCode", "UN")
-        }
-    except:
-        return {"country": "Unknown", "countryCode": "UN"}
-
 class ConnectionManager:
     def __init__(self):
-        self.active_workers = {} # id: {"ws": websocket, "geo": geo}
+        self.active_workers = {} # id: {"ws": websocket, "score": score}
         self.requesters = {} # id: websocket
         self.stats_listeners = set() # Neu: Alle Besucher der index.html
         self.total_verified_jobs = 0 # Neu: Globaler Zähler
@@ -154,8 +141,7 @@ class ConnectionManager:
             "type": "global_stats_update",
             "nodes": len(self.active_workers),
             "power": total_power,
-            "jobs": self.total_verified_jobs,
-            "countries": [v["geo"]["countryCode"] for v in self.active_workers.values()]
+            "jobs": self.total_verified_jobs
         })
 
     async def broadcast_stats(self):
@@ -168,12 +154,10 @@ class ConnectionManager:
 
     async def connect_worker(self, websocket: WebSocket):
         worker_id = str(uuid.uuid4())[:8]
-        geo = get_geo_info(websocket.client.host)
-        self.active_workers[worker_id] = {"ws": websocket, "geo": geo}
+        self.active_workers[worker_id] = {"ws": websocket}
         await self.broadcast_to_requesters({
             "type": "new_worker",
-            "worker_id": worker_id,
-            "geo": geo
+            "worker_id": worker_id
         })
         return worker_id
         await self.broadcast_stats()
@@ -182,7 +166,7 @@ class ConnectionManager:
         requester_id = str(uuid.uuid4())[:8]
         self.requesters[requester_id] = websocket
         # WICHTIG: Liste von Objekten senden
-        workers_list = [{"id": k, "geo": v["geo"]} for k, v in self.active_workers.items()]
+        workers_list = [{"id": k} for k in self.active_workers]
         try:
             await websocket.send_text(json.dumps({
                 "type": "init_workers",

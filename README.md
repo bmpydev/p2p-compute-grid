@@ -31,7 +31,7 @@ wasm-pack build --target web
 ```
 ### 3. Start the Signaling Server
 ```bash
-pip install fastapi uvicorn requests
+pip install fastapi uvicorn
 ```
 ```bash
 python3 main.py

@@ -19,7 +19,6 @@
         .btn-requester { border: 2px solid #2196F3; color: #2196F3; }
         .btn:hover { opacity: 0.8; transform: scale(1.05); }
 
-        #map-preview { margin-top: 30px; color: #444; font-size: 0.9em; }
     </style>
 </head>
 <body>
@@ -48,8 +47,6 @@
         <a href="/requester" class="btn btn-requester">Start Project</a>
     </div>
 
-    <div id="map-preview">Active Regions: <span id="regions">-</span></div>
-
     <script>
         const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + window.location.host + "/ws/stats");
         ws.onmessage = (event) => {
@@ -57,13 +54,6 @@
             document.getElementById("nodes").innerText = data.nodes;
             document.getElementById("power").innerText = data.power.toLocaleString();
             document.getElementById("jobs").innerText = data.jobs.toLocaleString();
-
-            // Regionen (Flaggen) anzeigen
-            const regions = data.countries.map(code => {
-                if (code === "LOC") return "🏠";
-                return code.toUpperCase().replace(/./g, char => String.fromCodePoint(char.charCodeAt(0) + 127397));
-            });
-            document.getElementById("regions").innerText = [...new Set(regions)].join(" ") || "Keine";
         };
     </script>
 </body>
