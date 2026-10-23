@@ -135,11 +135,7 @@
                                     return;
                                 }
 
-                                if (msg.type === "MANDELBROT") {
-                                    dispatch(msg, null, rid);
-                                } else {
-                                    peer.headerQueue.push(msg);
-                                }
+                                peer.headerQueue.push(msg);
                             } else {
                                 const header = peer.headerQueue.shift();
                                 if (header) {
@@ -207,7 +203,7 @@
         function dispatch(header, pixels, rid) {
             // Dispatch task to a random available sub-worker
             const worker = subWorkers[Math.floor(Math.random() * subWorkers.length)];
-            worker.postMessage({ header: { ...header, _rid: rid }, pixels }, pixels ? [pixels] : []);
+            worker.postMessage({ header: { ...header, _rid: rid }, pixels }, [pixels]);
         }
 
         run().catch(err => console.error("Worker Boot Error:", err));

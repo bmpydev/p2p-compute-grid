@@ -1,11 +1,4 @@
 use wasm_bindgen::prelude::*;
-use sha2::{Sha256, Digest};
-
-#[wasm_bindgen]
-pub struct RenderResult {
-    pixels: Vec<u8>,
-    hash: String,
-}
 
 #[wasm_bindgen]
 pub fn process_image_chunk(mut pixels: Vec<u8>) -> Vec<u8> {
@@ -29,44 +22,6 @@ pub fn run_benchmark() -> f64 {
         x = (x + i as f64).sqrt().sin() * 0.999;
     }
     x // Rückgabe nur zur Vermeidung von Optimierung
-}
-
-#[wasm_bindgen]
-impl RenderResult {
-    #[wasm_bindgen(getter)]
-    pub fn pixels(&self) -> Vec<u8> { self.pixels.clone() }
-    #[wasm_bindgen(getter)]
-    pub fn hash(&self) -> String { self.hash.clone() }
-}
-
-#[wasm_bindgen]
-pub fn render_mandelbrot_secure(width: u32, height: u32, start_x: f64, start_y: f64, zoom: f64) -> RenderResult {
-    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
-    let max_iter = 255;
-
-    // ... (Hier bleibt dein Mandelbrot-Loop exakt gleich) ...
-    for y in 0..height {
-        for x in 0..width {
-            let cx = start_x + (x as f64 / width as f64) * zoom;
-            let cy = start_y + (y as f64 / height as f64) * zoom;
-            let (mut zx, mut zy, mut i) = (0.0, 0.0, 0);
-            while zx * zx + zy * zy <= 4.0 && i < max_iter {
-                let xtemp = zx * zx - zy * zy + cx;
-                zy = 2.0 * zx * zy + cy;
-                zx = xtemp;
-                i += 1;
-            }
-            pixels.push(i as u8); pixels.push((i / 2) as u8);
-            pixels.push((i * 2) as u8); pixels.push(255);
-        }
-    }
-
-    // --- NEU: SHA-256 HASH BERECHNEN ---
-    let mut hasher = Sha256::new();
-    hasher.update(&pixels);
-    let hash_result = format!("{:x}", hasher.finalize());
-
-    RenderResult { pixels, hash: hash_result }
 }
 
 #[wasm_bindgen]
@@ -100,36 +55,4 @@ pub fn process_sobel(pixels: &[u8], width: u32, height: u32) -> Vec<u8> {
         }
     }
     output
-}
-
-#[wasm_bindgen]
-pub fn render_mandelbrot(width: u32, height: u32, start_x: f64, start_y: f64, zoom: f64) -> Vec<u8> {
-    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
-    let max_iter = 255;
-
-    for y in 0..height {
-        for x in 0..width {
-            // Berechne die komplexen Koordinaten
-            let cx = start_x + (x as f64 / width as f64) * zoom;
-            let cy = start_y + (y as f64 / height as f64) * zoom;
-
-            let mut zx = 0.0;
-            let mut zy = 0.0;
-            let mut i = 0;
-
-            while zx * zx + zy * zy <= 4.0 && i < max_iter {
-                let xtemp = zx * zx - zy * zy + cx;
-                zy = 2.0 * zx * zy + cy;
-                zx = xtemp;
-                i += 1;
-            }
-
-            // Farbe basierend auf Iterationen (einfaches Blau/Schwarz)
-            pixels.push(i as u8);       // R
-            pixels.push((i / 2) as u8); // G
-            pixels.push((i * 2) as u8); // B
-            pixels.push(255);           // Alpha
-        }
-    }
-    pixels
 }
