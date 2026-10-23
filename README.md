@@ -8,7 +8,7 @@ This project turns every browser tab into a compute node, forming a decentralize
 - **P2P Communication:** Direct browser-to-browser data transfer via WebRTC (DataChannels), bypassing server bottlenecks.
 - **High-Performance Kernels:** Image processing (Sobel, Inversion) and Mandelbrot fractals powered by Rust compiled to WebAssembly.
 - **Custom Logic Injection:** Requesters can deploy custom JavaScript logic across the grid with near-native performance.
-- **Security Sandboxing:** Worker nodes execute custom code in a secured environment with restricted API access (No fetch/XHR).
+- **Security Sandboxing:** Worker nodes execute custom code in a secured environment with restricted API access: custom code runs in a dedicated worker locked down by a strict Content-Security-Policy (no fetch/XHR/WebSocket, no script loading, no sub-workers) with a hard timeout.
 - **Result Verification:** Built-in redundancy system that cross-verifies results from multiple workers for data integrity.
 
 ## Tech Stack
@@ -52,8 +52,10 @@ python3 main.py
 
   - Transferable Objects: Used for zero-copy memory transfer between Workers and
     the main thread, ensuring 60fps performance even during heavy computation.
-  - API Lockdown: In the compute worker, global APIs like fetch and WebSocket
-    are disabled to prevent data exfiltration by malicious job requesters.
+  - API Lockdown: Requester code never runs in the compute worker. It is executed
+    in a separate sandbox worker served with `Content-Security-Policy:
+    default-src 'none'`, so network access and code loading are blocked by the
+    browser. If the CSP is not enforced, the sandbox refuses to run custom code.
   - JIT-Optimized Loops: Custom logic is wrapped in a pre-compiled function
     scope to allow the V8 engine to optimize execution paths.
 

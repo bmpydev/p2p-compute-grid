@@ -97,6 +97,14 @@ async def get_requester(): return FileResponse("requester.html")
 async def get_compute_node():
     return FileResponse("compute_node.js", media_type="application/javascript")
 
+# Die CSP ist die eigentliche Sandbox für Requester-Code: kein Netzwerk, kein Nachladen, keine Sub-Worker
+SANDBOX_CSP = "default-src 'none'; script-src 'unsafe-eval'"
+
+@app.get("/sandbox_worker.js")
+async def get_sandbox_worker():
+    return FileResponse("sandbox_worker.js", media_type="application/javascript",
+                        headers={"Content-Security-Policy": SANDBOX_CSP, "Cache-Control": "no-store"})
+
 @app.websocket("/ws/stats")
 async def stats_endpoint(websocket: WebSocket):
     await websocket.accept()

@@ -1,14 +1,51 @@
 import init, { process_image_chunk, process_sobel } from '/pkg/rust_worker.js';
 
 let wasmInit = init();
-let customFn = null;
-let lastCode = "";
 
-const safeGlobals = {
-    fetch: undefined, XMLHttpRequest: undefined, WebSocket: undefined,
-    Worker: undefined, indexedDB: undefined
-};
-Object.assign(self, safeGlobals);
+// Fremdcode läuft nie in diesem Worker, sondern in sandbox_worker.js (CSP-isoliert).
+const SANDBOX_TIMEOUT_MS = 10000;
+let sandbox = null;
+let nextJobId = 0;
+const pending = new Map(); // id: {resolve, reject, timer}
+
+function getSandbox() {
+    if (!sandbox) {
+        sandbox = new Worker('/sandbox_worker.js');
+        sandbox.onmessage = (e) => {
+            const job = pending.get(e.data.id);
+            if (!job) return;
+            pending.delete(e.data.id);
+            clearTimeout(job.timer);
+            if (e.data.ok) job.resolve(e.data.result);
+            else job.reject(new Error(e.data.error));
+        };
+        sandbox.onerror = (e) => {
+            e.preventDefault();
+            resetSandbox(new Error("Sandbox crashed"));
+        };
+    }
+    return sandbox;
+}
+
+// Endlosschleifen o. Ä.: Sandbox hart beenden, beim nächsten Job neu starten
+function resetSandbox(reason) {
+    if (sandbox) sandbox.terminate();
+    sandbox = null;
+    for (const job of pending.values()) {
+        clearTimeout(job.timer);
+        job.reject(reason);
+    }
+    pending.clear();
+}
+
+function runInSandbox(mode, code, buffer) {
+    return new Promise((resolve, reject) => {
+        const id = nextJobId++;
+        const timer = setTimeout(() => resetSandbox(new Error("Sandbox timeout")), SANDBOX_TIMEOUT_MS);
+        pending.set(id, { resolve, reject, timer });
+        getSandbox().postMessage({ id, mode, code: String(code), buffer }, [buffer]);
+    });
+}
 
 self.onmessage = async (e) => {
     await wasmInit;
@@ -18,31 +55,11 @@ self.onmessage = async (e) => {
 
     try {
         if (header.type === "CUSTOM_LOGIC") {
-            if (header.customCode !== lastCode) {
-                customFn = new Function('p', `
-                "use strict";
-    for (let i = 0; i < p.length; i += 4) {
-        let r = p[i], g = p[i+1], b = p[i+2], a = p[i+3];
-        // Hier wird der User-Code ausgeführt
-        const res = (() => { ${header.customCode} })();
-        p[i] = res[0]; p[i+1] = res[1]; p[i+2] = res[2]; p[i+3] = res[3];
-    }
-    `);
-                lastCode = header.customCode;
-            }
-            const input = new Uint8Array(pixels);
-            customFn(input);
-            result = input;
+            result = await runInSandbox("CUSTOM_LOGIC", header.customCode, pixels);
         }
         else if (header.type === "BIG_DATA") {
             resultType = "DATA_RESULT";
-            if (header.customCode !== lastCode) {
-                customFn = new Function('data', `"use strict"; ${header.customCode}`);
-                lastCode = header.customCode;
-            }
-            const data = new Uint8Array(pixels);
-            const output = customFn(data);
-            result = (output instanceof Uint8Array) ? output : new Uint8Array(output);
+            result = await runInSandbox("BIG_DATA", header.customCode, pixels);
         }
         else if (header.type === "IMAGE_SOBEL") {
             result = process_sobel(new Uint8Array(pixels), header.w, header.h);
