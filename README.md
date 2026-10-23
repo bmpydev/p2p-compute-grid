@@ -22,7 +22,7 @@ This project turns every browser tab into a compute node, forming a decentralize
 
 ### 1. Prerequisites
 - Rust & `wasm-pack`
-- Python 3.8+
+- Python 3.10+
 
 ### 2. Build the WASM Worker
 ```bash
@@ -31,7 +31,7 @@ wasm-pack build --target web
 ```
 ### 3. Start the Signaling Server
 ```bash
-pip install fastapi uvicorn
+pip install -r requirements.txt
 ```
 ```bash
 python3 main.py
@@ -102,6 +102,7 @@ The server log shows which requester connected.
 # Rust kernels
 (cd rust_worker && cargo test)
 # Signaling server (standard library unittest + websockets, starts its own server)
+pip install websockets
 python3 -m unittest discover -s tests/server -v
 # Browser end-to-end (Firefox + Node.js; requires the built rust_worker/pkg)
 (cd tests/browser && npm install && npm test)
@@ -148,4 +149,4 @@ For anything beyond a test setup on your own devices, set `GRID_WORKER_TOKEN`
 and only hand the worker link to machines you trust.
 
 ### License
-MIT
+MIT, see [LICENSE](LICENSE).
