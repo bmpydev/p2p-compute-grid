@@ -484,10 +484,14 @@ window.onload = () => {
             dc.onmessage = (e) => {
                 if (typeof e.data === "string") {
                     const msg = JSON.parse(e.data);
-                    if (msg.type === "PONG") { peers[workerId].ping = Date.now() - msg.time; updateUI(workerId); return; }
+                    // Werte vom Worker sind nicht vertrauenswürdig -> nur geprüfte Zahlen übernehmen
+                    if (msg.type === "PONG") {
+                        if (Number.isFinite(msg.time)) peers[workerId].ping = Math.max(0, Date.now() - msg.time);
+                        updateUI(workerId); return;
+                    }
                     if (msg.type === "WORKER_INFO") {
-                        peers[workerId].capacity = msg.cores || 1;
-                        peers[workerId].score = msg.score || 0;
+                        if (Number.isInteger(msg.cores)) peers[workerId].capacity = Math.min(Math.max(msg.cores, 1), 256);
+                        if (Number.isFinite(msg.score) && msg.score >= 0) peers[workerId].score = msg.score;
                         updateUI(workerId); return;
                     }
                     lastMeta = msg;
@@ -701,12 +705,24 @@ window.onload = () => {
             finishedTiles = 0;
             document.getElementById("globalStatus").innerText = `Cluster processing: ${type}`;
         }
-        function logToConsole(msg) { const con = document.getElementById("dataConsole"); con.innerHTML = `<div>${msg}</div>` + con.innerHTML; }
+        function logToConsole(msg) {
+            // textContent: Meldungen enthalten Fremddaten (z. B. Dateinamen)
+            const line = document.createElement("div");
+            line.textContent = msg;
+            document.getElementById("dataConsole").prepend(line);
+        }
 
         function updateUI(id) {
             const p = peers[id], card = document.getElementById(`card-${id}`);
             if(!card) return;
-            card.innerHTML = `<div style="display:flex; justify-content:space-between;"><strong>Node ${id}</strong><small>${p.ping}ms</small></div>Threads: ${p.capacity} | Jobs: ${p.tilesDone}`;
+            const head = document.createElement("div");
+            head.style.cssText = "display:flex; justify-content:space-between;";
+            const name = document.createElement("strong");
+            name.textContent = `Node ${id}`;
+            const ping = document.createElement("small");
+            ping.textContent = `${p.ping}ms`;
+            head.append(name, ping);
+            card.replaceChildren(head, `Threads: ${p.capacity} | Jobs: ${p.tilesDone}`);
             card.className = `worker-card ${p.activeTasks < p.capacity ? 'active' : 'busy'}`;
             calculateGlobalStats();
         }
