@@ -284,6 +284,19 @@ class HostOriginTests(unittest.TestCase):
                 with self.subTest(path=path, origin=origin, host=req_host):
                     self.assertEqual(http_status(path, req_host, origin, websocket=True), want)
 
+    def test_pages_and_scripts_get_page_csp(self):
+        for path in ("/", "/worker", "/requester", "/requester.js", "/compute_node.js", "/pkg/rust_worker.js"):
+            with self.subTest(path):
+                conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=3)
+                conn.request("GET", path)
+                res = conn.getresponse()
+                csp = res.getheader("Content-Security-Policy") or ""
+                self.assertIn("script-src 'self' 'wasm-unsafe-eval'", csp)
+                self.assertNotIn("unsafe-inline';", csp.split("style-src")[0])  # nur Styles dürfen inline sein
+                self.assertIn("frame-ancestors 'none'", csp)
+                self.assertEqual(res.getheader("X-Content-Type-Options"), "nosniff")
+                conn.close()
+
     def test_sandbox_worker_is_served_with_strict_csp(self):
         conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=3)
         conn.request("GET", "/sandbox_worker.js")

@@ -63,8 +63,13 @@ async function withBrowser(fn) {
     try { return await fn(browser); } finally { await browser.close(); }
 }
 
+// Protokolliert CSP-Verstöße der Seite in window.__csp
+const CSP_RECORDER = `window.__csp = [];
+document.addEventListener('securitypolicyviolation', e => window.__csp.push(e.violatedDirective + ' ' + e.blockedURI));`;
+
 async function openWorker(browser, preload) {
     const page = await browser.newPage();
+    await page.evaluateOnNewDocument(CSP_RECORDER);
     if (preload) await page.evaluateOnNewDocument(preload);
     await page.goto(BASE + '/worker');
     return page;
@@ -74,6 +79,7 @@ async function openRequester(browser, workers) {
     const page = await browser.newPage();
     page.errors = [];
     page.on('pageerror', e => page.errors.push(e.message));
+    await page.evaluateOnNewDocument(CSP_RECORDER);
     await page.goto(`${BASE}/requester#token=${TOKEN}`);
     await page.waitForFunction(n => Object.values(peers).filter(p => p.dc?.readyState === 'open').length >= n,
         { timeout: 20000 }, workers);
@@ -378,6 +384,45 @@ const tests = {
             assert.deepEqual(r.map(x => x.bytes.length), [0, 0, 0, 6, 36]);
             assert.deepEqual(r[3].bytes, [254, 253, 252, 4, 5, 6]);
             assert.deepEqual(logs.filter(l => /unreachable|RuntimeError|Compute Error/.test(l)), []);
+        });
+    },
+
+    async pageCsp() {
+        await withBrowser(async browser => {
+            const w1 = await openWorker(browser), w2 = await openWorker(browser);
+            await sleep(2500);
+            const req = await openRequester(browser, 2);
+            // Bedienung über echte UI-Ereignisse statt direkter Funktionsaufrufe
+            await req.select('#redundancyLevel', '1');
+            assert.equal(await req.evaluate(() => scheduler.requiredRedundancy), 1, 'Redundanz-Auswahl muss wirken');
+            await req.click('.tab-btn[data-tab="tab-video"]');
+            assert.equal(await req.evaluate(() => document.getElementById('tab-video').classList.contains('active')), true);
+            await req.click('.tab-btn[data-tab="tab-image"]');
+            await req.evaluate(() => { document.getElementById('effectType').value = 'CUSTOM_LOGIC'; });
+            await req.evaluate(c => { document.getElementById('customCode').value = c; }, INVERT_CODE);
+            await setTestImage(req, 'twoColor');
+            await req.click('[data-action="uploadAndProcess"]');
+            await req.waitForFunction(() => totalTiles > 0 && finishedTiles === totalTiles, { timeout: 30000 });
+            assert.equal((await countPixels(req, INVERTED)).correct, 8400);
+            for (const page of [w1, w2, req]) {
+                assert.deepEqual(await page.evaluate(() => window.__csp), [], 'normaler Betrieb ohne CSP-Verstöße');
+            }
+            // Eingeschleustes Markup muss an der CSP scheitern. (Code direkt aus page.evaluate läuft
+            // privilegiert und unterliegt der Seiten-CSP nicht -- daher nur Markup, das die Seite selbst ausführt.)
+            const r = await req.evaluate(async () => {
+                const div = document.createElement('div');
+                div.innerHTML = '<img src="data:," onerror="window.__inj=1">';
+                document.body.append(div);
+                const script = document.createElement('script');
+                script.textContent = 'window.__inj2 = 1';
+                document.body.append(script);
+                await new Promise(res => setTimeout(res, 300));
+                return { handler: !!window.__inj, script: !!window.__inj2, violations: window.__csp };
+            });
+            assert.equal(r.handler, false, 'eingeschleuster Inline-Handler darf nicht laufen');
+            assert.equal(r.script, false, 'eingeschleustes Inline-Skript darf nicht laufen');
+            assert.ok(r.violations.some(v => v.startsWith('script-src-attr')), `Verstöße: ${JSON.stringify(r.violations)}`);
+            assert.ok(r.violations.some(v => v.startsWith('script-src-elem')), `Verstöße: ${JSON.stringify(r.violations)}`);
         });
     },
 

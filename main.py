@@ -2,7 +2,7 @@ import uuid, json, os, asyncio, hmac, secrets, math, time
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.datastructures import Headers
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import PlainTextResponse
 from urllib.parse import urlsplit
 
@@ -55,6 +55,32 @@ class HostOriginGuard:
         await self.app(scope, receive, send)
 
 app.add_middleware(HostOriginGuard)
+
+# Seiten-CSP: nur eigene Skripte (keine Inline-Skripte/-Handler), WASM erlaubt, Netzwerk nur zum eigenen Host
+PAGE_CSP = ("default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self'; worker-src 'self'; "
+            "object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+
+class SecurityHeaders:
+    # Setzt die Seiten-CSP auf alle HTTP-Antworten ohne eigene CSP (sandbox_worker.js behält ihre strengere)
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers.setdefault("Content-Security-Policy", PAGE_CSP)
+                headers.setdefault("X-Content-Type-Options", "nosniff")
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+app.add_middleware(SecurityHeaders)
 
 # Requester dürfen Code an alle Worker verteilen -> immer Token-pflichtig.
 # Ohne GRID_REQUESTER_TOKEN wird bei jedem Start ein zufälliger Token erzeugt.
@@ -225,6 +251,15 @@ async def get_worker(): return FileResponse("worker.html")
 
 @app.get("/requester")
 async def get_requester(): return FileResponse("requester.html")
+
+@app.get("/index.js")
+async def get_index_js(): return FileResponse("index.js", media_type="application/javascript")
+
+@app.get("/worker.js")
+async def get_worker_js(): return FileResponse("worker.js", media_type="application/javascript")
+
+@app.get("/requester.js")
+async def get_requester_js(): return FileResponse("requester.js", media_type="application/javascript")
 
 @app.get("/compute_node.js")
 async def get_compute_node():
